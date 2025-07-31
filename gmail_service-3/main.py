@@ -220,12 +220,17 @@ async def pubsub_handler(request: Request):
         for ruc_deudor, facturas_grupo in invoices_by_debtor_ruc.items():
             correos_finales_str = ""
             try:
-                # 1. Actualiza el contacto en Excel con el correo del formulario
+                # 1. Actualiza el contacto en Excel con el correo del formulario (CORREGIDO)
                 nombre_deudor = facturas_grupo[0]['debtor_name']
-                correo_operacion = payload.get('metadata', {}).get('mailVerificacion', '').strip()
+                correo_operacion_str = payload.get('metadata', {}).get('mailVerificacion', '').strip()
                 
-                update_payload = {"ruc": ruc_deudor, "correo": correo_operacion, "nombre_deudor": nombre_deudor}
-                requests.post(f"{EXCEL_SERVICE_URL}/update-contact", json=update_payload, timeout=20).raise_for_status()
+                # Divide la cadena de correos en una lista
+                correos_operacion = [c.strip() for c in correo_operacion_str.split(';') if c.strip()]
+
+                # Itera sobre cada correo y lo actualiza individualmente
+                for correo in correos_operacion:
+                    update_payload = {"ruc": ruc_deudor, "correo": correo, "nombre_deudor": nombre_deudor}
+                    requests.post(f"{EXCEL_SERVICE_URL}/update-contact", json=update_payload, timeout=20).raise_for_status()
 
                 # 2. Obtiene la lista completa de correos para ese RUC
                 response = requests.get(f"{EXCEL_SERVICE_URL}/get-emails/{ruc_deudor}", timeout=20)
