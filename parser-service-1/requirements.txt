@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+google-cloud-storage
+google-cloud-pubsub
+lxml
+requests
+python-dotenv

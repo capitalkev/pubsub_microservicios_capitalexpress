@@ -1,0 +1,7 @@
+# excel/requirements.txt
+fastapi
+uvicorn
+gspread
+google-auth-oauthlib
+pydantic
+google-cloud-pubsub

@@ -1,0 +1,10 @@
+# ---- Servidor Web ----
+fastapi
+uvicorn[standard]
+python-dotenv
+google-cloud
+requests
+sqlalchemy
+pydantic
+google-cloud-storage
+google-cloud-pubsub

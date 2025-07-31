@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+google-cloud-storage
+python-multipart
+requests
+python-dotenv
+sqlalchemy
+cloud-sql-python-connector[pg8000]
+psycopg2-binary
+google-cloud-pubsub
+firebase-admin

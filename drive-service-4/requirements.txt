@@ -1,0 +1,9 @@
+# ---- Servidor Web ----
+fastapi
+uvicorn[standard]
+python-dotenv
+google-cloud-storage
+google-api-python-client
+google-auth-oauthlib
+pydantic
+google-cloud-pubsub
