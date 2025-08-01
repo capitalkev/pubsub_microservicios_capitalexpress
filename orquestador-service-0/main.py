@@ -44,6 +44,7 @@ GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "operaciones-peru")
 BUCKET_NAME = os.getenv("BUCKET_NAME")
 TRELLO_SERVICE_URL = os.getenv("TRELLO_SERVICE_URL")
 DRIVE_SERVICE_URL = os.getenv("DRIVE_SERVICE_URL")
+GMAIL_SERVICE_URL = os.getenv("GMAIL_SERVICE_URL")
 
 storage_client = storage.Client()
 publisher = pubsub_v1.PublisherClient()
@@ -150,26 +151,30 @@ def process_final_operation(payload: dict, db: Session):
             "original_tracking_id": original_tracking_id
         }
 
-        trello_update_data = {}
+        try:
+            if GMAIL_SERVICE_URL:
+                print(f"FINALIZER: Llamando directamente a Gmail para op {operation_id}")
+                gmail_response = requests.post(f"{GMAIL_SERVICE_URL}/send-email", json=notification_payload, timeout=300)
+                gmail_response.raise_for_status()
+                print(f"FINALIZER: Llamada a Gmail para op {operation_id} completada con éxito.")
+            else:
+                print("ADVERTENCIA: GMAIL_SERVICE_URL no está configurada.")
+        except requests.exceptions.RequestException as e:
+            print(f"ERROR: Falló la llamada a Gmail para op {operation_id}. Error: {e}")
+            if e.response:
+                print(f"GMAIL-SERVICE respondió con: {e.response.text}")
+        
         try:
             if TRELLO_SERVICE_URL:
                 print(f"FINALIZER: Llamando directamente a Trello para op {operation_id}")
                 trello_response = requests.post(f"{TRELLO_SERVICE_URL}/create-card", json=notification_payload, timeout=300)
                 trello_response.raise_for_status()
-                trello_result = trello_response.json()
-                trello_update_data = {"trello_data": {"created": True, "card_id": trello_result.get("card_id")}}
             else:
                 print("ADVERTENCIA: TRELLO_SERVICE_URL no está configurada.")
-                trello_update_data = {"trello_data": {"created": False, "error": "TRELLO_SERVICE_URL no configurada"}}
         except requests.exceptions.RequestException as e:
             print(f"ERROR: Falló la llamada a Trello para op {operation_id}. Error: {e}")
-            trello_update_data = {"trello_data": {"created": False, "error": str(e)}}
-        finally:
-            stmt = pg_insert(models.OperationStaging).values(
-                tracking_id=original_tracking_id, **trello_update_data
-            ).on_conflict_do_update(index_elements=['tracking_id'], set_=trello_update_data)
-            db.execute(stmt)
-            db.commit()
+
+        
 
         publisher.publish(TOPIC_OPERATION_PERSISTED, json.dumps(notification_payload).encode("utf-8")).result()
         print(f"FINALIZER: Notificación para Gmail (Op: {operation_id}) publicada.")
