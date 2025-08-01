@@ -2,7 +2,7 @@
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
 from sqlalchemy import func
-from datetime import datetime
+from datetime import datetime, timezone
 from models import Operacion, Factura, Empresa, Usuario 
 from sqlalchemy import text # <-- Asegúrate de tener esta importación
 
@@ -24,7 +24,7 @@ class OperationRepository:
         Genera un ID de operación secuencial de forma segura, usando un bloqueo
         de transacción para prevenir condiciones de carrera.
         """
-        today_str = datetime.now().strftime('%Y%m%d')
+        today_str = datetime.now(timezone.utc).strftime('%Y%m%d')
         id_prefix = f"OP-{today_str}-"
         
         # --- LÓGICA CORREGIDA Y A PRUEBA DE FALLOS (SIN CAMBIAR LA DB) ---
@@ -125,7 +125,7 @@ class OperationRepository:
         return [{"id": r.id, "fechaIngreso": r.fechaIngreso.isoformat(), "cliente": r.cliente, "monto": r.monto, "moneda": r.moneda, "estado": "En Verificación"} for r in results]
         
     def update_and_get_last_login(self, email: str, name: str) -> Optional[datetime]:
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         usuario = self.db.query(Usuario).filter(Usuario.email == email).first()
         if usuario:
             previous_login = usuario.ultimo_ingreso

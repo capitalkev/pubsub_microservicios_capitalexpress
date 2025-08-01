@@ -26,6 +26,11 @@ CAVALI_STATUS_URL = os.getenv("CAVALI_STATUS_URL")
 GCS_BUCKET_NAME_TOKEN = os.getenv("GCS_BUCKET_NAME")
 TOKEN_FILE_NAME = "cavali_token.json"
 
+# ---- NUEVA CONSTANTE ----
+# Define el tamaño del lote de XML a procesar en cada llamada a Cavali.
+# Puedes ajustar este número según el tamaño promedio de tus archivos XML.
+XML_BATCH_SIZE = 30
+
 storage_client = storage.Client()
 publisher = pubsub_v1.PublisherClient()
 TOPIC_INVOICES_VALIDATED = publisher.topic_path(GCP_PROJECT_ID, "invoices-validated")
@@ -65,6 +70,9 @@ def get_cavali_token():
     logging.info(f"Nuevo token de Cavali guardado en GCS.")
     return new_token_data["access_token"]
 
+# ==============================================================================
+# ---- FUNCIÓN `pubsub_handler` MODIFICADA ----
+# ==============================================================================
 @app.post("/pubsub-handler", status_code=status.HTTP_204_NO_CONTENT)
 async def pubsub_handler(request: Request):
     body = await request.json()
@@ -77,7 +85,7 @@ async def pubsub_handler(request: Request):
         tracking_id = payload["tracking_id"]
         xml_paths = payload.get("gcs_paths", {}).get("xml", [])
         
-        logging.info(f"CAVALI: Procesando {tracking_id} con {len(xml_paths)} XMLs.")
+        logging.info(f"CAVALI: Procesando {tracking_id} con {len(xml_paths)} XMLs en lotes de {XML_BATCH_SIZE}.")
 
         xml_files_b64_group = []
         for gcs_path in xml_paths:
@@ -92,39 +100,60 @@ async def pubsub_handler(request: Request):
         token = get_cavali_token()
         headers = {"Authorization": f"Bearer {token}", "x-api-key": CAVALI_API_KEY, "Content-Type": "application/json"}
         
-        invoice_xml_list = [{"name": f['filename'], "fileXml": f['content_base64']} for f in xml_files_b64_group]
-        payload_bloqueo = {"invoiceXMLDetail": {"invoiceXML": invoice_xml_list}}
-        response_bloqueo = requests.post(CAVALI_BLOCK_URL, json=payload_bloqueo, headers=headers, timeout=300)
-        response_bloqueo.raise_for_status()
-        bloqueo_data = response_bloqueo.json()
-        id_proceso = bloqueo_data.get("response", {}).get("idProceso")
+        # Mapa para consolidar los resultados de todos los lotes
+        final_results_map = {}
 
-        if not id_proceso:
-            raise ValueError(f"Cavali no retornó un idProceso. Respuesta: {bloqueo_data}")
+        # Procesar los XML en lotes
+        for i in range(0, len(xml_files_b64_group), XML_BATCH_SIZE):
+            batch = xml_files_b64_group[i:i + XML_BATCH_SIZE]
+            batch_filenames = [f['filename'] for f in batch]
+            logging.info(f"CAVALI: Procesando lote {i//XML_BATCH_SIZE + 1} para {tracking_id} con {len(batch)} archivos: {batch_filenames}")
 
-        time.sleep(7) # Espera recomendada por Cavali
+            invoice_xml_list = [{"name": f['filename'], "fileXml": f['content_base64']} for f in batch]
+            payload_bloqueo = {"invoiceXMLDetail": {"invoiceXML": invoice_xml_list}}
+            
+            try:
+                response_bloqueo = requests.post(CAVALI_BLOCK_URL, json=payload_bloqueo, headers=headers, timeout=300)
+                response_bloqueo.raise_for_status()
+                bloqueo_data = response_bloqueo.json()
+                id_proceso = bloqueo_data.get("response", {}).get("idProceso")
+
+                if not id_proceso:
+                    raise ValueError(f"Cavali no retornó un idProceso para el lote. Respuesta: {bloqueo_data}")
+
+                time.sleep(7) 
+                
+                payload_estado = {"ProcessFilter": {"idProcess": id_proceso}}
+                response_estado = requests.post(CAVALI_STATUS_URL, json=payload_estado, headers=headers, timeout=300)
+                response_estado.raise_for_status()
+                cavali_response_data = response_estado.json()
+
+                invoice_details = cavali_response_data.get("response", {}).get("Process", {}).get("ProcessInvoiceDetail", {}).get("Invoice", [])
+                for invoice in invoice_details:
+                    # Lógica para mapear el resultado al nombre de archivo original
+                    nombre_archivo_original = "desconocido"
+                    for f in batch: # Buscar solo en el lote actual
+                        if (str(invoice.get("ruc", "")) in f["filename"] and
+                            invoice.get("serie", "") in f["filename"] and
+                            str(invoice.get("numeration", "")) in f["filename"]):
+                            nombre_archivo_original = f["filename"]
+                            break
+                    
+                    final_results_map[nombre_archivo_original] = {
+                        "message": invoice.get("message"), "process_id": id_proceso, "result_code": invoice.get("resultCode")
+                    }
+            except requests.exceptions.HTTPError as http_err:
+                logging.error(f"Error HTTP procesando el lote para {tracking_id}. Archivos: {batch_filenames}. Error: {http_err}")
+                # Marcar los archivos de este lote como fallidos
+                for f in batch:
+                    final_results_map[f['filename']] = {"message": f"Error en lote: {http_err}", "process_id": None, "result_code": "BATCH_ERROR"}
+            except Exception as e:
+                logging.error(f"Error inesperado procesando el lote para {tracking_id}. Archivos: {batch_filenames}. Error: {e}")
+                for f in batch:
+                    final_results_map[f['filename']] = {"message": f"Error inesperado en lote: {e}", "process_id": None, "result_code": "UNEXPECTED_BATCH_ERROR"}
+
         
-        payload_estado = {"ProcessFilter": {"idProcess": id_proceso}}
-        response_estado = requests.post(CAVALI_STATUS_URL, json=payload_estado, headers=headers, timeout=300)
-        response_estado.raise_for_status()
-        cavali_response_data = response_estado.json()
-
-        results_map = {}
-        invoice_details = cavali_response_data.get("response", {}).get("Process", {}).get("ProcessInvoiceDetail", {}).get("Invoice", [])
-        for invoice in invoice_details:
-            # Lógica para mapear el resultado al nombre de archivo original
-            nombre_archivo_original = "desconocido"
-            for f in xml_files_b64_group:
-                if (str(invoice.get("ruc", "")) in f["filename"] and
-                    invoice.get("serie", "") in f["filename"] and
-                    str(invoice.get("numeration", "")) in f["filename"]):
-                    nombre_archivo_original = f["filename"]
-                    break
-            results_map[nombre_archivo_original] = {
-                "message": invoice.get("message"), "process_id": id_proceso, "result_code": invoice.get("resultCode")
-            }
-        
-        payload["cavali_results"] = results_map
+        payload["cavali_results"] = final_results_map
         
         next_message_data = json.dumps(payload).encode("utf-8")
         future = publisher.publish(TOPIC_INVOICES_VALIDATED, next_message_data)

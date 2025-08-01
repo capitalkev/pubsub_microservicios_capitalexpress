@@ -7,7 +7,7 @@ import requests
 from typing import List, Annotated, Optional
 from collections import defaultdict
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request, Response, status, Header
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -25,7 +25,8 @@ models.Base.metadata.create_all(bind=engine)
 load_dotenv()
 
 try:
-    firebase_admin.initialize_app(credentials.ApplicationDefault())
+    if not firebase_admin._apps:
+        firebase_admin.initialize_app(credentials.ApplicationDefault())
 except Exception as e:
     print(f"ADVERTENCIA: Firebase SDK no inicializado: {e}")
 
@@ -42,9 +43,7 @@ app.add_middleware(
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "operaciones-peru")
 BUCKET_NAME = os.getenv("BUCKET_NAME")
 TRELLO_SERVICE_URL = os.getenv("TRELLO_SERVICE_URL")
-# NEW: Define DRIVE_SERVICE_URL
 DRIVE_SERVICE_URL = os.getenv("DRIVE_SERVICE_URL")
-
 
 storage_client = storage.Client()
 publisher = pubsub_v1.PublisherClient()
@@ -53,11 +52,26 @@ bucket = storage_client.bucket(BUCKET_NAME)
 TOPIC_OPERATION_SUBMITTED = publisher.topic_path(GCP_PROJECT_ID, "operation-submitted")
 TOPIC_OPERATION_PERSISTED = publisher.topic_path(GCP_PROJECT_ID, "operation-persisted")
 
-# --- Autenticación ---
-async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
-    if not authorization or not authorization.startswith("Bearer "): raise HTTPException(status_code=401)
-    try: return auth.verify_id_token(authorization.split("Bearer ")[1])
-    except Exception as e: raise HTTPException(status_code=401, detail=f"Token inválido: {e}")
+
+async def get_current_user(authorization: Optional[str] = Header(None), db: Session = Depends(get_db)) -> dict:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Token de autorización inválido")
+    try:
+        decoded_token = auth.verify_id_token(authorization.split("Bearer ")[1])
+        email = decoded_token['email']
+        
+        user_in_db = db.query(models.Usuario).filter(models.Usuario.email == email).first()
+        
+        if not user_in_db:
+            repo = OperationRepository(db)
+            repo.update_and_get_last_login(email, decoded_token.get('name', ''))
+            user_in_db = db.query(models.Usuario).filter(models.Usuario.email == email).first()
+
+        # Se asigna el rol como un string simple desde la BD
+        decoded_token['role'] = user_in_db.rol 
+        return decoded_token
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Token inválido o error de base de datos: {e}")
 
 # ==============================================================================
 # ROL 1: INICIO DEL FLUJO (FAN-OUT)
@@ -72,8 +86,8 @@ async def submit_operation_async(
 ):
     try:
         metadata = json.loads(metadata_str)
-        tracking_id = str(uuid.uuid4()) # This is the UUID
-        upload_folder = f"operations/{datetime.now().strftime('%Y-%m-%d')}/{tracking_id}"
+        tracking_id = str(uuid.uuid4())
+        upload_folder = f"operations/{datetime.now(timezone.utc).strftime('%Y-%m-%d')}/{tracking_id}"
         def upload_file(file: UploadFile, subfolder: str) -> str:
             blob_path = f"{upload_folder}/{subfolder}/{file.filename}"; blob = bucket.blob(blob_path); blob.upload_from_file(file.file); return f"gs://{BUCKET_NAME}/{blob_path}"
         
@@ -117,7 +131,7 @@ def process_final_operation(payload: dict, db: Session):
     original_tracking_id = payload["tracking_id"]
 
     for currency, invoices_in_group in invoices_by_currency.items():
-        operation_id = repo.generar_siguiente_id_operacion() # This generates OP-fecha-incremental
+        operation_id = repo.generar_siguiente_id_operacion()
         print(f"FINALIZER: Generado nuevo ID {operation_id} para moneda {currency}.")
         repo.save_full_operation(
             operation_id=operation_id, metadata=payload['metadata'], drive_url=payload['drive_folder_url'],
@@ -157,7 +171,6 @@ def process_final_operation(payload: dict, db: Session):
             db.execute(stmt)
             db.commit()
 
-
         publisher.publish(TOPIC_OPERATION_PERSISTED, json.dumps(notification_payload).encode("utf-8")).result()
         print(f"FINALIZER: Notificación para Gmail (Op: {operation_id}) publicada.")
 
@@ -166,17 +179,11 @@ def process_final_operation(payload: dict, db: Session):
 # ==============================================================================
 @app.get("/operation-status/{tracking_id}")
 async def get_operation_status(tracking_id: str, db: Session = Depends(get_db)):
-    """
-    Consulta la tabla de staging y devuelve el progreso, incluyendo la URL de Drive.
-    """
     staging_record = db.query(models.OperationStaging).filter_by(tracking_id=tracking_id).first()
     if not staging_record:
         raise HTTPException(status_code=404, detail="Operación no encontrada en la etapa de procesamiento.")
-
     drive_info = staging_record.drive_data or {}
-    return {
-        "drive_folder_url": drive_info.get("drive_folder_url")
-    }
+    return {"drive_folder_url": drive_info.get("drive_folder_url")}
 
 @app.get("/api/operaciones")
 async def get_user_operations(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -185,43 +192,36 @@ async def get_user_operations(user: dict = Depends(get_current_user), db: Sessio
 
 @app.get("/api/gestiones/operaciones")
 async def get_operaciones_gestion(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    """
-    Endpoint REFACTORIZADO para el panel de Gestión.
-    Aplica lógica de negocio para priorizar y cargar eficientemente los datos.
-    """
-    # 1. Definir un orden de prioridad: las más antiguas y de mayor monto primero.
-    # Usamos case para dar más peso a la antigüedad.
     priority_order = case(
-        (models.Operacion.fecha_creacion < (datetime.now() - timedelta(days=5)), 1),
-        (models.Operacion.fecha_creacion < (datetime.now() - timedelta(days=2)), 2),
+        (models.Operacion.fecha_creacion < (datetime.now(timezone.utc) - timedelta(days=5)), 1),
+        (models.Operacion.fecha_creacion < (datetime.now(timezone.utc) - timedelta(days=2)), 2),
         else_=3
     ).asc()
-
-    # 2. Carga optimizada (Eager Loading) para evitar múltiples consultas a la BD
     base_query = db.query(models.Operacion).options(
         joinedload(models.Operacion.cliente),
         selectinload(models.Operacion.facturas).joinedload(models.Factura.deudor),
-        selectinload(models.Operacion.gestiones).joinedload(models.Gestion.analista)
+        selectinload(models.Operacion.gestiones).joinedload(models.Gestion.analista),
+        joinedload(models.Operacion.analista_asignado)
     )
+    
+    user_role = user.get('role')
 
-    # 3. Filtro por rol
-    if user['email'] == "kevin.tupac@capitalexpress.cl":
+    if user_role == 'admin':
         query = base_query.filter(models.Operacion.estado.notin_(['Completada', 'Rechazada', 'Anulada']))
     else:
-        # Un analista estándar solo ve lo que está activamente en verificación
-        query = base_query.filter(models.Operacion.estado == 'En Verificación')
-
+        query = base_query.filter(
+            models.Operacion.analista_asignado_email == user['email'],
+            models.Operacion.estado.notin_(['Completada', 'Rechazada', 'Anulada'])
+        )
+    
     operaciones_db = query.order_by(priority_order, models.Operacion.monto_sumatoria_total.desc()).all()
-
-    # 4. Transformación de datos: el backend hace los cálculos, no el frontend
+    
     resultado_formateado = []
     for op in operaciones_db:
-        # Lógica de negocio para Alertas de IA (ejemplo)
         alerta_ia = None
-        antiquity_days = (datetime.now().date() - op.fecha_creacion.date()).days
+        antiquity_days = (datetime.now(timezone.utc).date() - op.fecha_creacion.date()).days
         if antiquity_days > 3 and len(op.gestiones) == 0:
             alerta_ia = {"tipo": "llamar", "texto": "¡Llamar ya! Operación con más de 3 días sin gestión."}
-        
         resultado_formateado.append({
             "id": op.id,
             "cliente": op.cliente.razon_social if op.cliente else "N/A",
@@ -230,26 +230,15 @@ async def get_operaciones_gestion(user: dict = Depends(get_current_user), db: Se
             "moneda": op.moneda_sumatoria,
             "fechaIngreso": op.fecha_creacion.isoformat(),
             "antiquity": antiquity_days,
-            "correosEnviados": 2, # Este dato debería venir de una tabla de logs de correo
-            "adelantoExpress": op.adelanto_express, # Corregir el campo en el modelo si es necesario
+            "correosEnviados": 2, 
+            "adelantoExpress": op.adelanto_express,
             "estadoOperacion": op.estado,
-            "gestiones": [{
-                "fecha": g.fecha_creacion.isoformat(),
-                "tipo": g.tipo,
-                "resultado": g.resultado,
-                "notas": g.notas,
-                "analista": g.analista.nombre if g.analista else "Sistema"
-            } for g in op.gestiones],
-            "facturas": [{
-                "folio": f.numero_documento,
-                "monto": f.monto_total,
-                "moneda": f.moneda,
-                "estado": f.estado
-            } for f in op.facturas],
+            "analistaAsignado": { "nombre": op.analista_asignado.nombre if op.analista_asignado else "Sin Asignar", "email": op.analista_asignado.email if op.analista_asignado else None },
+            "gestiones": [{ "fecha": g.fecha_creacion.isoformat(), "tipo": g.tipo, "resultado": g.resultado, "notas": g.notas, "analista": g.analista.nombre if g.analista else "Sistema" } for g in op.gestiones],
+            "facturas": [{ "folio": f.numero_documento, "monto": f.monto_total, "moneda": f.moneda, "estado": f.estado } for f in op.facturas],
             "alertaIA": alerta_ia
         })
     return resultado_formateado
-
 
 class GestionCreate(BaseModel):
     tipo: str
@@ -264,21 +253,14 @@ async def registrar_gestion(op_id: str, gestion_data: GestionCreate, user: dict 
     operacion = db.query(models.Operacion).filter(models.Operacion.id == op_id).first()
     if not operacion:
         raise HTTPException(status_code=404, detail="Operación no encontrada")
-
-    nueva_gestion = models.Gestion(
-        id_operacion=op_id,
-        analista_email=user['email'],
-        **gestion_data.dict()
-    )
+    nueva_gestion = models.Gestion(id_operacion=op_id, analista_email=user['email'], **gestion_data.dict())
     db.add(nueva_gestion)
     db.commit()
     db.refresh(nueva_gestion)
     return nueva_gestion
 
-
-# orquestador-service-0/main.py
 class FacturaUpdate(BaseModel):
-    estado: str # "Verificada" o "Rechazada"
+    estado: str
 
 @app.patch("/api/operaciones/{op_id}/facturas/{folio}")
 async def actualizar_factura_y_operacion(op_id: str, folio: str, update_data: FacturaUpdate, db: Session = Depends(get_db)):
@@ -287,23 +269,17 @@ async def actualizar_factura_y_operacion(op_id: str, folio: str, update_data: Fa
     ).first()
     if not factura:
         raise HTTPException(status_code=404, detail="Factura no encontrada")
-
     factura.estado = update_data.estado
-    
-    # --- Lógica de Negocio Centralizada ---
     operacion = db.query(models.Operacion).filter(models.Operacion.id == op_id).first()
     facturas_de_operacion = operacion.facturas
-    
     if any(f.estado == 'Rechazada' for f in facturas_de_operacion):
         operacion.estado = 'Discrepancia'
     elif all(f.estado == 'Verificada' for f in facturas_de_operacion):
         operacion.estado = 'Conforme'
     else:
         operacion.estado = 'En Verificación'
-    
     db.commit()
     db.refresh(operacion)
-    
     return {"folio": folio, "nuevoEstadoFactura": factura.estado, "nuevoEstadoOperacion": operacion.estado}
 
 class AdelantoJustificacion(BaseModel):
@@ -316,11 +292,8 @@ async def mover_a_adelanto(op_id: str, data: AdelantoJustificacion, user: dict =
         raise HTTPException(status_code=404, detail="Operación no encontrada")
     operacion.adelanto_express = True
     nueva_gestion = models.Gestion(
-        id_operacion=op_id,
-        analista_email=user['email'],
-        tipo="Adelanto Express",
-        resultado="Movido a cola de Adelanto",
-        notas=data.justificacion
+        id_operacion=op_id, analista_email=user['email'], tipo="Adelanto Express",
+        resultado="Movido a cola de Adelanto", notas=data.justificacion
     )
     db.add(nueva_gestion)
     db.commit()
@@ -332,8 +305,23 @@ async def completar_operacion(op_id: str, user: dict = Depends(get_current_user)
     operacion = db.query(models.Operacion).filter(models.Operacion.id == op_id).first()
     if not operacion:
         raise HTTPException(status_code=404, detail="Operación no encontrada")
-    
-    # Cambia el estado a "Completada" para que se filtre automáticamente
     operacion.estado = 'Completada'
     db.commit()
     return {"status": "ok", "message": f"Operación {op_id} marcada como completada."}
+
+@app.patch("/api/operaciones/{op_id}/assign", status_code=status.HTTP_200_OK)
+async def asignar_operacion(op_id: str, assignee_email: str, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    operacion = db.query(models.Operacion).filter(models.Operacion.id == op_id).first()
+    if not operacion:
+        raise HTTPException(status_code=404, detail="Operación no encontrada")
+    operacion.analista_asignado_email = assignee_email
+    db.commit()
+    return {"status": "ok", "message": f"Operación {op_id} asignada a {assignee_email}."}
+
+@app.get("/api/users/analysts")
+async def get_analyst_users(db: Session = Depends(get_db)):
+    """Devuelve una lista de usuarios con rol de gestión o admin."""
+    roles_permitidos = ['gestion', 'admin']
+    
+    analysts = db.query(models.Usuario).filter(models.Usuario.rol.in_(roles_permitidos)).all()
+    return [{"email": u.email, "nombre": u.nombre} for u in analysts]

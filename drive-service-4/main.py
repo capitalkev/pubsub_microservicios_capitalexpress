@@ -37,14 +37,11 @@ def upload_files_in_background(all_gcs_paths: list, folder_id: str, tracking_id:
             bucket_name, blob_name = gcs_path.replace("gs://", "").split("/", 1)
             blob = storage_client.bucket(bucket_name).blob(blob_name)
             file_bytes = blob.download_as_bytes()
-            
-            # Obtener el tipo MIME del archivo usando mimetypes
-            # Si no se puede adivinar, se usa 'application/octet-stream' como fallback
             mime_type, _ = mimetypes.guess_type(os.path.basename(gcs_path))
             mime_type = mime_type or 'application/octet-stream'
 
             file_metadata = {'name': os.path.basename(gcs_path), 'parents': [folder_id]}
-            media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype=mime_type, resumable=True) # Usar mime_type específico
+            media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype=mime_type, resumable=True)
             drive_service.files().create(body=file_metadata, media_body=media, fields='id', supportsAllDrives=True).execute()
         except Exception as e:
             print(f"WARN-BG: Falló la subida de '{gcs_path}'. Error: {e}")
@@ -59,10 +56,10 @@ async def pubsub_handler(request: Request, background_tasks: BackgroundTasks):
     try:
         message_data = base64.b64decode(body["message"]["data"]).decode("utf-8")
         payload = json.loads(message_data)
-        tracking_id = payload["tracking_id"] # This is the UUID initially
+        tracking_id = payload["tracking_id"]
 
         # ETAPA RÁPIDA: Crear carpeta y publicar el link
-        operation_id = payload.get("operation_id", tracking_id) # Will still use tracking_id here
+        operation_id = payload.get("operation_id", tracking_id)
         folder_name = f"Operacion_{operation_id}"
         folder_metadata = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder', 'parents': [DRIVE_PARENT_FOLDER_ID]}
         folder = drive_service.files().create(body=folder_metadata, fields='id, webViewLink', supportsAllDrives=True).execute()
