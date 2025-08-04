@@ -105,26 +105,33 @@ class OperationRepository:
         self.db.commit()
         return operation_id
     
-    def get_operations_by_user_email(self, email: str) -> List[Dict[str, Any]]:
-        if email == "kevin.tupac@capitalexpress.cl":
-            results = (
-                self.db.query(
-                    Operacion.id, Operacion.fecha_creacion.label("fechaIngreso"),
-                    Empresa.razon_social.label("cliente"), Operacion.monto_sumatoria_total.label("monto"),
-                    Operacion.moneda_sumatoria.label("moneda"),
-                    Operacion.estado
-                ).join(Empresa, Operacion.cliente_ruc == Empresa.ruc).order_by(Operacion.fecha_creacion.desc()).all()
-            )
-        else:
-            results = (
-                self.db.query(
-                    Operacion.id, Operacion.fecha_creacion.label("fechaIngreso"),
-                    Empresa.razon_social.label("cliente"), Operacion.monto_sumatoria_total.label("monto"),
-                    Operacion.moneda_sumatoria.label("moneda"),
-                    Operacion.estado
-                ).join(Empresa, Operacion.cliente_ruc == Empresa.ruc).filter(Operacion.email_usuario == email).order_by(Operacion.fecha_creacion.desc()).all()
-            )
+    def get_dashboard_operations(self, user_email: str, user_role: str) -> List[Dict[str, Any]]:
+        """
+        Obtiene operaciones para el dashboard principal.
+        - Admins ven todas las operaciones.
+        - Ventas ven solo las operaciones creadas por ellos.
+        """
+        
+        base_query = self.db.query(
+            Operacion.id, Operacion.fecha_creacion.label("fechaIngreso"),
+            Empresa.razon_social.label("cliente"), Operacion.monto_sumatoria_total.label("monto"),
+            Operacion.moneda_sumatoria.label("moneda"),
+            Operacion.estado
+        ).join(Empresa, Operacion.cliente_ruc == Empresa.ruc)
+
+        # Lógica de filtrado por ROL
+        if user_role == 'admin':
+            # El admin no necesita filtros adicionales, ve todo.
+            query = base_query
+        else: # Por defecto, cualquier otro rol (incluido 'ventas') solo ve lo suyo.
+            # Filtra donde el 'email_usuario' de la operación coincida con el del solicitante.
+            query = base_query.filter(Operacion.email_usuario == user_email)
+            
+        # Ordenamos los resultados y los ejecutamos
+        results = query.order_by(Operacion.fecha_creacion.desc()).all()
+
         return [{"id": r.id, "fechaIngreso": r.fechaIngreso.isoformat(), "cliente": r.cliente, "monto": r.monto, "moneda": r.moneda, "estado": r.estado} for r in results]
+        
         
     def update_and_get_last_login(self, email: str, name: str) -> Optional[datetime]:
         now = datetime.now(timezone.utc)

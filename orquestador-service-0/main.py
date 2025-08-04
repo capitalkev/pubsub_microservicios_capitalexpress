@@ -192,8 +192,18 @@ async def get_operation_status(tracking_id: str, db: Session = Depends(get_db)):
 
 @app.get("/api/operaciones")
 async def get_user_operations(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    repo = OperationRepository(db); last_login = repo.update_and_get_last_login(user['email'], user.get('name', ''))
-    return {"last_login": last_login.isoformat() if last_login else None, "operations": repo.get_operations_by_user_email(user['email'])}
+    repo = OperationRepository(db)
+    last_login = repo.update_and_get_last_login(user['email'], user.get('name', ''))
+    
+    # Obtenemos el rol del usuario que ya fue verificado por get_current_user
+    user_role = user.get('role')
+    
+    # Llamamos al método del repositorio pasando el email y el rol
+    # El repositorio se encargará de aplicar el filtro correcto
+    operations = repo.get_dashboard_operations(user['email'], user_role)
+    
+    return {"last_login": last_login.isoformat() if last_login else None, "operations": operations}
+
 
 @app.get("/api/gestiones/operaciones")
 async def get_operaciones_gestion(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -324,9 +334,40 @@ async def asignar_operacion(op_id: str, assignee_email: str, user: dict = Depend
     db.commit()
     return {"status": "ok", "message": f"Operación {op_id} asignada a {assignee_email}."}
 
+class UserSession(BaseModel):
+    email: str
+    nombre: str | None = None
+    rol: str
+    ultimo_ingreso: datetime | None = None
+
+@app.get("/api/users/me", response_model=UserSession)
+async def get_current_user_session(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    """
+    Devuelve los detalles del usuario autenticado, incluyendo su rol,
+    basado en el token JWT proporcionado.
+    """
+    # La dependencia 'get_current_user' ya ha hecho todo el trabajo pesado:
+    # 1. Verificó el token.
+    # 2. Consultó la base de datos para obtener el rol.
+    # 3. Lo añadió al diccionario 'user'.
+    
+    # Solo necesitamos buscar de nuevo para obtener el objeto completo para la respuesta.
+    user_in_db = db.query(models.Usuario).filter(models.Usuario.email == user['email']).first()
+    
+    if not user_in_db:
+        # Esto no debería pasar si get_current_user funcionó, pero es una buena salvaguarda.
+        raise HTTPException(status_code=404, detail="Usuario no encontrado en la base de datos.")
+
+    return UserSession(
+        email=user_in_db.email,
+        nombre=user_in_db.nombre,
+        rol=user_in_db.rol,
+        ultimo_ingreso=user_in_db.ultimo_ingreso
+    )
+
+
 @app.get("/api/users/analysts")
 async def get_analyst_users(db: Session = Depends(get_db)):
-    """Devuelve una lista de usuarios con rol de gestión o admin."""
     roles_permitidos = ['gestion', 'admin']
     
     analysts = db.query(models.Usuario).filter(models.Usuario.rol.in_(roles_permitidos)).all()
