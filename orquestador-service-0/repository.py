@@ -111,7 +111,8 @@ class OperationRepository:
                 self.db.query(
                     Operacion.id, Operacion.fecha_creacion.label("fechaIngreso"),
                     Empresa.razon_social.label("cliente"), Operacion.monto_sumatoria_total.label("monto"),
-                    Operacion.moneda_sumatoria.label("moneda")
+                    Operacion.moneda_sumatoria.label("moneda"),
+                    Operacion.estado
                 ).join(Empresa, Operacion.cliente_ruc == Empresa.ruc).order_by(Operacion.fecha_creacion.desc()).all()
             )
         else:
@@ -119,10 +120,11 @@ class OperationRepository:
                 self.db.query(
                     Operacion.id, Operacion.fecha_creacion.label("fechaIngreso"),
                     Empresa.razon_social.label("cliente"), Operacion.monto_sumatoria_total.label("monto"),
-                    Operacion.moneda_sumatoria.label("moneda")
+                    Operacion.moneda_sumatoria.label("moneda"),
+                    Operacion.estado
                 ).join(Empresa, Operacion.cliente_ruc == Empresa.ruc).filter(Operacion.email_usuario == email).order_by(Operacion.fecha_creacion.desc()).all()
             )
-        return [{"id": r.id, "fechaIngreso": r.fechaIngreso.isoformat(), "cliente": r.cliente, "monto": r.monto, "moneda": r.moneda, "estado": "En Verificación"} for r in results]
+        return [{"id": r.id, "fechaIngreso": r.fechaIngreso.isoformat(), "cliente": r.cliente, "monto": r.monto, "moneda": r.moneda, "estado": r.estado} for r in results]
         
     def update_and_get_last_login(self, email: str, name: str) -> Optional[datetime]:
         now = datetime.now(timezone.utc)

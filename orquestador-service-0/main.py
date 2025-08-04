@@ -212,12 +212,13 @@ async def get_operaciones_gestion(user: dict = Depends(get_current_user), db: Se
     user_role = user.get('role')
 
     if user_role == 'admin':
-        query = base_query.filter(models.Operacion.estado.notin_(['Completada', 'Rechazada', 'Anulada']))
+        query = base_query.filter(models.Operacion.estado.notin_(['Verificada', 'Completada', 'Rechazada', 'Anulada']))
     else:
         query = base_query.filter(
             models.Operacion.analista_asignado_email == user['email'],
-            models.Operacion.estado.notin_(['Completada', 'Rechazada', 'Anulada'])
-        )
+            models.Operacion.estado.notin_(['Verificada', 'Completada', 'Rechazada', 'Anulada'])
+    )
+
     
     operaciones_db = query.order_by(priority_order, models.Operacion.monto_sumatoria_total.desc()).all()
     
@@ -280,7 +281,7 @@ async def actualizar_factura_y_operacion(op_id: str, folio: str, update_data: Fa
     if any(f.estado == 'Rechazada' for f in facturas_de_operacion):
         operacion.estado = 'Discrepancia'
     elif all(f.estado == 'Verificada' for f in facturas_de_operacion):
-        operacion.estado = 'Conforme'
+        operacion.estado = 'pendiente'
     else:
         operacion.estado = 'En Verificación'
     db.commit()
@@ -310,7 +311,7 @@ async def completar_operacion(op_id: str, user: dict = Depends(get_current_user)
     operacion = db.query(models.Operacion).filter(models.Operacion.id == op_id).first()
     if not operacion:
         raise HTTPException(status_code=404, detail="Operación no encontrada")
-    operacion.estado = 'Completada'
+    operacion.estado = 'Verificada'
     db.commit()
     return {"status": "ok", "message": f"Operación {op_id} marcada como completada."}
 

@@ -51,7 +51,7 @@ class Factura(Base):
     monto_neto = Column(Float)
     mensaje_cavali = Column(Text)
     id_proceso_cavali = Column(String(255))
-    estado = Column(String(50), default='Pendiente', nullable=False)
+    estado = Column(String(50), default='En Verificación', nullable=False)
     
     operacion = relationship("Operacion", back_populates="facturas")
     deudor = relationship("Empresa")
@@ -80,8 +80,8 @@ class Gestion(Base):
     id_operacion = Column(String(255), ForeignKey("operaciones.id"), nullable=False)
     fecha_creacion = Column(DateTime(timezone=True), server_default=func.now())
     analista_email = Column(String(255), ForeignKey("usuarios.email"))
-    tipo = Column(String(50)) # Ej: "Llamada", "Email Manual", "Adelanto Express"
-    resultado = Column(String(100)) # Ej: "Conforme", "No Contesta"
+    tipo = Column(String(50))
+    resultado = Column(String(100))
     nombre_contacto = Column(String(255), nullable=True)
     cargo_contacto = Column(String(100), nullable=True)
     telefono_email_contacto = Column(String(255), nullable=True)
