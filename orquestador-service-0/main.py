@@ -207,37 +207,26 @@ async def get_user_operations(user: dict = Depends(get_current_user), db: Sessio
 
 @app.get("/api/gestiones/operaciones")
 async def get_operaciones_gestion(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    priority_order = case(
-        (models.Operacion.fecha_creacion < (datetime.now(timezone.utc) - timedelta(days=5)), 1),
-        (models.Operacion.fecha_creacion < (datetime.now(timezone.utc) - timedelta(days=2)), 2),
-        else_=3
-    ).asc()
-    base_query = db.query(models.Operacion).options(
-        joinedload(models.Operacion.cliente),
-        selectinload(models.Operacion.facturas).joinedload(models.Factura.deudor),
-        selectinload(models.Operacion.gestiones).joinedload(models.Gestion.analista),
-        joinedload(models.Operacion.analista_asignado)
-    )
+    # La lógica compleja ahora está en el repositorio. El endpoint es simple y claro.
+    repo = OperationRepository(db)
     
-    user_role = user.get('role')
-
-    if user_role == 'admin':
-        query = base_query.filter(models.Operacion.estado.notin_(['Verificada', 'Completada', 'Rechazada', 'Anulada']))
-    else:
-        query = base_query.filter(
-            models.Operacion.analista_asignado_email == user['email'],
-            models.Operacion.estado.notin_(['Verificada', 'Completada', 'Rechazada', 'Anulada'])
-    )
-
+    # 1. Obtenemos las operaciones usando el nuevo método centralizado.
+    operaciones_db = repo.get_gestiones_operations(user_email=user['email'], user_role=user.get('role'))
     
-    operaciones_db = query.order_by(priority_order, models.Operacion.monto_sumatoria_total.desc()).all()
-    
+    # 2. El resto de la función es solo para formatear la respuesta, como debe ser.
     resultado_formateado = []
     for op in operaciones_db:
         alerta_ia = None
         antiquity_days = (datetime.now(timezone.utc).date() - op.fecha_creacion.date()).days
         if antiquity_days > 3 and len(op.gestiones) == 0:
             alerta_ia = {"tipo": "llamar", "texto": "¡Llamar ya! Operación con más de 3 días sin gestión."}
+
+        # Aseguramos que el estado de la operación se mapea correctamente para el frontend
+        estado_operacion = op.estado
+        if op.estado == 'Conforme' and not op.adelanto_express:
+             # Este es el estado que el frontend entiende para mostrar el botón "Completar"
+             pass 
+
         resultado_formateado.append({
             "id": op.id,
             "cliente": op.cliente.razon_social if op.cliente else "N/A",
@@ -248,7 +237,7 @@ async def get_operaciones_gestion(user: dict = Depends(get_current_user), db: Se
             "antiquity": antiquity_days,
             "correosEnviados": 2, 
             "adelantoExpress": op.adelanto_express,
-            "estadoOperacion": op.estado,
+            "estadoOperacion": estado_operacion,
             "analistaAsignado": { "nombre": op.analista_asignado.nombre if op.analista_asignado else "Sin Asignar", "email": op.analista_asignado.email if op.analista_asignado else None },
             "gestiones": [{ "fecha": g.fecha_creacion.isoformat(), "tipo": g.tipo, "resultado": g.resultado, "notas": g.notas, "analista": g.analista.nombre if g.analista else "Sistema" } for g in op.gestiones],
             "facturas": [{ "folio": f.numero_documento, "monto": f.monto_total, "moneda": f.moneda, "estado": f.estado } for f in op.facturas],

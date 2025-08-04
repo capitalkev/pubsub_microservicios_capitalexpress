@@ -1,10 +1,11 @@
 # orquestador-service-0/repository.py (Versión Final Correcta)
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
-from sqlalchemy import func
-from datetime import datetime, timezone
-from models import Operacion, Factura, Empresa, Usuario 
-from sqlalchemy import text # <-- Asegúrate de tener esta importación
+from sqlalchemy import case, func
+from datetime import datetime, timedelta, timezone
+from models import Gestion, Operacion, Factura, Empresa, Usuario 
+from sqlalchemy import text
+from sqlalchemy.orm import joinedload, selectinload
 
 class OperationRepository:
     def __init__(self, db: Session):
@@ -131,6 +132,42 @@ class OperationRepository:
         results = query.order_by(Operacion.fecha_creacion.desc()).all()
 
         return [{"id": r.id, "fechaIngreso": r.fechaIngreso.isoformat(), "cliente": r.cliente, "monto": r.monto, "moneda": r.moneda, "estado": r.estado} for r in results]
+    
+    
+    def get_gestiones_operations(self, user_email: str, user_role: str) -> List[Operacion]:
+        """
+        Obtiene las operaciones para la cola de tareas de gestión con una lógica de roles robusta.
+        - Admins ven todas las operaciones activas.
+        - Gestión ve solo las operaciones activas asignadas a ellos.
+        """
+        # 1. Definimos explícitamente los estados que pertenecen a esta cola de trabajo.
+        # Esto es más robusto que una lista de exclusión.
+        ESTADOS_DE_GESTION_ACTIVA = ['En Verificación', 'Discrepancia', 'Conforme', 'Adelanto Express']
+
+        # 2. Construimos la consulta base con todas las relaciones necesarias para evitar N+1 queries.
+        base_query = self.db.query(Operacion).options(
+            joinedload(Operacion.cliente),
+            selectinload(Operacion.facturas).joinedload(Factura.deudor),
+            selectinload(Operacion.gestiones).joinedload(Gestion.analista),
+            joinedload(Operacion.analista_asignado)
+        ).filter(Operacion.estado.in_(ESTADOS_DE_GESTION_ACTIVA))
+
+        # 3. Aplicamos el filtro de rol de forma clara.
+        if user_role != 'admin':
+            query = base_query.filter(Operacion.analista_asignado_email == user_email)
+        else:
+            # El admin no necesita filtros adicionales.
+            query = base_query
+
+        # 4. Definimos un ordenamiento lógico.
+        priority_order = case(
+            (Operacion.fecha_creacion < (datetime.now(timezone.utc) - timedelta(days=5)), 1),
+            (Operacion.fecha_creacion < (datetime.now(timezone.utc) - timedelta(days=2)), 2),
+            else_=3
+        ).asc()
+
+        return query.order_by(priority_order, Operacion.monto_sumatoria_total.desc()).all()
+
         
         
     def update_and_get_last_login(self, email: str, name: str) -> Optional[datetime]:
