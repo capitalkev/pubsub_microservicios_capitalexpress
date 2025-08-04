@@ -195,11 +195,7 @@ async def get_user_operations(user: dict = Depends(get_current_user), db: Sessio
     repo = OperationRepository(db)
     last_login = repo.update_and_get_last_login(user['email'], user.get('name', ''))
     
-    # Obtenemos el rol del usuario que ya fue verificado por get_current_user
     user_role = user.get('role')
-    
-    # Llamamos al método del repositorio pasando el email y el rol
-    # El repositorio se encargará de aplicar el filtro correcto
     operations = repo.get_dashboard_operations(user['email'], user_role)
     
     return {"last_login": last_login.isoformat() if last_login else None, "operations": operations}
@@ -344,7 +340,6 @@ async def get_current_user_session(user: dict = Depends(get_current_user), db: S
     user_in_db = db.query(models.Usuario).filter(models.Usuario.email == user['email']).first()
     
     if not user_in_db:
-        # Esto no debería pasar si get_current_user funcionó, pero es una buena salvaguarda.
         raise HTTPException(status_code=404, detail="Usuario no encontrado en la base de datos.")
 
     return UserSession(
