@@ -160,7 +160,7 @@ def create_gloria_excel(invoice_data_list: List[Dict]) -> (str, bytes): # type: 
     return filename, excel_bytes
 
 
-def create_html_body(invoice_data_list: List[Dict]) -> str:
+def create_html_body(invoice_data_list: List[Dict], operation_id) -> str:
     """Crea el cuerpo HTML del correo a partir de una lista de diccionarios de facturas."""
     first_invoice = invoice_data_list[0]
     client_name = first_invoice.get("client_name")
@@ -237,6 +237,7 @@ def create_html_body(invoice_data_list: List[Dict]) -> str:
         Asimismo, en caso de que vuestra representada cometa un delito de forma conjunta y/o en contubernio con el emitente de la factura, 
         dicha acción podría tipificarse como delito de asociación ilícita para delinquir, según el artículo 317 del Código Penal, por lo 
         que nos reservamos el derecho de iniciar las acciones penales correspondientes en caso resulte necesario"</p>
+        <p>{operation_id}</p>
     </div>
     </body>
     </html>
@@ -291,7 +292,7 @@ async def send_email_handler(payload: Dict[str, Any]): # <-- ¡Este es el cambio
                 continue
 
             message = EmailMessage()
-            message.add_alternative(create_html_body(facturas_grupo), subtype='html')
+            message.add_alternative(create_html_body(facturas_grupo, operation_id), subtype='html')
             message['To'] = correos_finales_str
             cc_list = set(FIXED_CC_LIST)
             if payload.get("user_email"):

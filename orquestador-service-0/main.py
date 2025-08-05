@@ -292,6 +292,7 @@ async def mover_a_adelanto(op_id: str, data: AdelantoJustificacion, user: dict =
     if not operacion:
         raise HTTPException(status_code=404, detail="Operación no encontrada")
     operacion.adelanto_express = True
+    operacion.estado = 'Adelanto'
     nueva_gestion = models.Gestion(
         id_operacion=op_id, analista_email=user['email'], tipo="Adelanto Express",
         resultado="Movido a cola de Adelanto", notas=data.justificacion

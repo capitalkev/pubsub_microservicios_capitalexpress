@@ -142,7 +142,7 @@ class OperationRepository:
         """
         # 1. Definimos explícitamente los estados que pertenecen a esta cola de trabajo.
         # Esto es más robusto que una lista de exclusión.
-        ESTADOS_DE_GESTION_ACTIVA = ['En Verificación', 'Discrepancia', 'Conforme', 'Adelanto Express']
+        ESTADOS_DE_GESTION_ACTIVA = ['En Verificación', 'Discrepancia', 'Conforme', 'Adelanto']
 
         # 2. Construimos la consulta base con todas las relaciones necesarias para evitar N+1 queries.
         base_query = self.db.query(Operacion).options(
