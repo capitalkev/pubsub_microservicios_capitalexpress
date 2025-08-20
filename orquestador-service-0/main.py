@@ -39,7 +39,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Clientes y Variables Globales ---
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "operaciones-peru")
 BUCKET_NAME = os.getenv("BUCKET_NAME")
 TRELLO_SERVICE_URL = os.getenv("TRELLO_SERVICE_URL")
@@ -74,9 +73,6 @@ async def get_current_user(authorization: Optional[str] = Header(None), db: Sess
     except Exception as e:
         raise HTTPException(status_code=401, detail=f"Token inválido o error de base de datos: {e}")
 
-# ==============================================================================
-# ROL 1: INICIO DEL FLUJO (FAN-OUT)
-# ==============================================================================
 @app.post("/submit-operation", status_code=status.HTTP_202_ACCEPTED)
 async def submit_operation_async(
     metadata_str: Annotated[str, Form(alias="metadata")],
@@ -100,9 +96,6 @@ async def submit_operation_async(
     except Exception as e:
         traceback.print_exc(); raise HTTPException(status_code=500, detail=str(e))
 
-# ==============================================================================
-# ROL 2: AGREGADOR (FAN-IN)
-# ==============================================================================
 @app.post("/pubsub-aggregator", status_code=status.HTTP_204_NO_CONTENT)
 async def pubsub_aggregator(request: Request, db: Session = Depends(get_db)):
     body = await request.json(); message = body.get("message", {})
@@ -179,9 +172,6 @@ def process_final_operation(payload: dict, db: Session):
         publisher.publish(TOPIC_OPERATION_PERSISTED, json.dumps(notification_payload).encode("utf-8")).result()
         print(f"FINALIZER: Notificación para Gmail (Op: {operation_id}) publicada.")
 
-# ==============================================================================
-# ROL 3: ENDPOINTS DE CONSULTA
-# ==============================================================================
 @app.get("/operation-status/{tracking_id}")
 async def get_operation_status(tracking_id: str, db: Session = Depends(get_db)):
     staging_record = db.query(models.OperationStaging).filter_by(tracking_id=tracking_id).first()
@@ -203,13 +193,10 @@ async def get_user_operations(user: dict = Depends(get_current_user), db: Sessio
 
 @app.get("/api/gestiones/operaciones")
 async def get_operaciones_gestion(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    # La lógica compleja ahora está en el repositorio. El endpoint es simple y claro.
     repo = OperationRepository(db)
     
-    # 1. Obtenemos las operaciones usando el nuevo método centralizado.
     operaciones_db = repo.get_gestiones_operations(user_email=user['email'], user_role=user.get('role'))
     
-    # 2. El resto de la función es solo para formatear la respuesta, como debe ser.
     resultado_formateado = []
     for op in operaciones_db:
         alerta_ia = None
@@ -217,10 +204,8 @@ async def get_operaciones_gestion(user: dict = Depends(get_current_user), db: Se
         if antiquity_days > 3 and len(op.gestiones) == 0:
             alerta_ia = {"tipo": "llamar", "texto": "¡Llamar ya! Operación con más de 3 días sin gestión."}
 
-        # Aseguramos que el estado de la operación se mapea correctamente para el frontend
         estado_operacion = op.estado
         if op.estado == 'Conforme' and not op.adelanto_express:
-             # Este es el estado que el frontend entiende para mostrar el botón "Completar"
              pass 
 
         resultado_formateado.append({
@@ -332,12 +317,6 @@ async def get_current_user_session(user: dict = Depends(get_current_user), db: S
     Devuelve los detalles del usuario autenticado, incluyendo su rol,
     basado en el token JWT proporcionado.
     """
-    # La dependencia 'get_current_user' ya ha hecho todo el trabajo pesado:
-    # 1. Verificó el token.
-    # 2. Consultó la base de datos para obtener el rol.
-    # 3. Lo añadió al diccionario 'user'.
-    
-    # Solo necesitamos buscar de nuevo para obtener el objeto completo para la respuesta.
     user_in_db = db.query(models.Usuario).filter(models.Usuario.email == user['email']).first()
     
     if not user_in_db:
