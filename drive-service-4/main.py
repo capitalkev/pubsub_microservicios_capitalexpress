@@ -3,7 +3,7 @@ import io
 import base64
 import json
 import traceback
-import mimetypes # Importar mimetypes
+import mimetypes
 from fastapi import FastAPI, HTTPException, Request, Response, status, BackgroundTasks
 from google.cloud import storage, pubsub_v1
 from google.oauth2.service_account import Credentials
@@ -13,7 +13,6 @@ from typing import Optional
 
 app = FastAPI(title="Drive Service (Optimizado)")
 
-# --- Configuración ---
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "operaciones-peru")
 DRIVE_PARENT_FOLDER_ID = os.getenv("DRIVE_PARENT_FOLDER_ID", "1dl5FE6wKk6aXfspFrjm5YUs9rHP92Q_5")
 SERVICE_ACCOUNT_FILE = 'service_account.json'
@@ -58,7 +57,6 @@ async def pubsub_handler(request: Request, background_tasks: BackgroundTasks):
         payload = json.loads(message_data)
         tracking_id = payload["tracking_id"]
 
-        # ETAPA RÁPIDA: Crear carpeta y publicar el link
         operation_id = payload.get("operation_id", tracking_id)
         folder_name = f"Operacion_{operation_id}"
         folder_metadata = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder', 'parents': [DRIVE_PARENT_FOLDER_ID]}
@@ -68,12 +66,10 @@ async def pubsub_handler(request: Request, background_tasks: BackgroundTasks):
 
         print(f"DRIVE: Carpeta '{folder_name}' creada. Publicando link.")
         
-        # Publicar el mensaje con el link inmediatamente
         payload["drive_folder_url"] = folder_url
         next_message_data = json.dumps(payload).encode("utf-8")
         publisher.publish(TOPIC_FILES_ARCHIVED, next_message_data).result()
         
-        # ETAPA LENTA: Delegar la subida de archivos a un segundo plano
         gcs_paths = payload.get("gcs_paths", {})
         all_gcs_paths = gcs_paths.get('xml', []) + gcs_paths.get('pdf', []) + gcs_paths.get('respaldo', [])
         background_tasks.add_task(upload_files_in_background, all_gcs_paths, folder_id, tracking_id)
