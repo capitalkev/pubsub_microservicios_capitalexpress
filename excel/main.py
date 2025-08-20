@@ -48,7 +48,6 @@ def update_contact(contacto: Contacto):
 def get_emails(ruc: str):
     try:
         celda = worksheet.find(ruc, in_column=1)
-        # CORRECCIÓN: Manejar el caso de que la celda de correos esté vacía o no exista
         correos = ""
         if celda:
             correos_val = worksheet.cell(celda.row, 3).value
@@ -56,7 +55,6 @@ def get_emails(ruc: str):
                 correos = correos_val
         return {"ruc": ruc, "emails": correos}
     except gspread.exceptions.CellNotFound:
-        # Si no se encuentra el RUC, devolvemos una lista vacía, no un error.
         return {"ruc": ruc, "emails": ""}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error inesperado al obtener correos: {str(e)}")
