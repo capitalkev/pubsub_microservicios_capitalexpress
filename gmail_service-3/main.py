@@ -14,7 +14,6 @@ from openpyxl.utils import get_column_letter
 
 load_dotenv()
 
-# --- Configuración ---
 USER_TOKEN_FILE = "token.json"
 SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 SENDER_USER_ID = "kevin.gianecchine@capitalexpress.cl"
@@ -67,7 +66,6 @@ RUC_GLORIA = [
     "20481640483",
 ]
 
-# El título ahora refleja que es un servicio por HTTP directo
 app = FastAPI(title="Gmail Service (HTTP Direct)")
 
 
@@ -246,7 +244,7 @@ def create_html_body(invoice_data_list: List[Dict], operation_id) -> str:
 
 
 @app.post("/send-email", status_code=status.HTTP_200_OK)
-async def send_email_handler(payload: Dict[str, Any]): # <-- ¡Este es el cambio!
+async def send_email_handler(payload: Dict[str, Any]):
     operation_id = payload.get("operation_id")
     if not operation_id:
         raise HTTPException(status_code=400, detail="Falta 'operation_id' en el payload")
