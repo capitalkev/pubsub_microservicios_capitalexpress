@@ -3,8 +3,6 @@ import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
-
-# --- Importaciones añadidas ---
 from dotenv import load_dotenv
 from google.cloud.sql.connector import Connector
 
