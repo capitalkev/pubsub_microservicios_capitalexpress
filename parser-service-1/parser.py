@@ -5,19 +5,59 @@ def extract_invoice_data(xml_content_bytes: bytes) -> dict:
     """
     Toma el contenido de un archivo XML en bytes, lo parsea y devuelve
     un diccionario con los datos extraídos de la factura.
-   
+    Incluye validación robusta para prevenir errores por XMLs malformados.
     """
+    REQUIRED_FIELDS = [
+        ('.//cbc:ID', 'document_id'),
+        ('.//cac:LegalMonetaryTotal/cbc:PayableAmount', 'total_amount'),  
+        ('.//cac:AccountingSupplierParty//cac:PartyLegalEntity/cbc:RegistrationName', 'client_name'),
+        ('.//cac:AccountingCustomerParty//cac:PartyLegalEntity/cbc:RegistrationName', 'debtor_name'),
+        ('.//cbc:IssueDate', 'issue_date')
+    ]
+    
+    VALID_CURRENCIES = {'PEN', 'USD', 'EUR'}
+    
     try:
-        xml_content = xml_content_bytes.decode('iso-8859-1')
-        root = etree.fromstring(xml_content.encode('utf-8'))
-    except Exception:
-        xml_content = xml_content_bytes.decode('utf-8').lstrip('\ufeff')
-        root = etree.fromstring(xml_content.encode('utf-8'))
+        # Decodificación robusta con múltiples encodings
+        xml_content = None
+        root = None
+        
+        for encoding in ['iso-8859-1', 'utf-8', 'cp1252']:
+            try:
+                xml_content = xml_content_bytes.decode(encoding).lstrip('\ufeff')
+                root = etree.fromstring(xml_content.encode('utf-8'))
+                break
+            except (UnicodeDecodeError, etree.XMLSyntaxError):
+                continue
+        
+        if root is None:
+            return {"error": "XML con encoding no válido o malformado", "valid": False}
+            
+    except Exception as e:
+        return {"error": f"Error al decodificar XML: {str(e)}", "valid": False}
 
     ns = {
         'cbc': 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2',
         'cac': 'urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2'
     }
+
+    # Validar namespace correcto
+    root_namespace = root.nsmap.get(None)
+    if root_namespace != 'urn:oasis:names:specification:ubl:schema:xsd:Invoice-2':
+        return {"error": f"XML no es factura UBL válida. Namespace: {root_namespace}", "valid": False}
+
+    # Validar campos obligatorios
+    for xpath, field_name in REQUIRED_FIELDS:
+        element = root.find(xpath, ns)
+        if element is None or not (element.text and element.text.strip()):
+            return {"error": f"Campo obligatorio faltante o vacío: {field_name} ({xpath})", "valid": False}
+
+    # Validar moneda
+    currency_element = root.find('.//cac:LegalMonetaryTotal/cbc:PayableAmount', ns)
+    currency = currency_element.get('currencyID', 'N/A') if currency_element is not None else 'N/A'
+    
+    if currency not in VALID_CURRENCIES:
+        return {"error": f"Moneda no válida: {currency}. Válidas: {VALID_CURRENCIES}", "valid": False}
 
     def find_text(xpath, default=None):
         element = root.find(xpath, ns)
@@ -57,7 +97,8 @@ def extract_invoice_data(xml_content_bytes: bytes) -> dict:
         "debtor_name": find_text('.//cac:AccountingCustomerParty//cac:PartyLegalEntity/cbc:RegistrationName'),
         "debtor_ruc": find_text('.//cac:AccountingCustomerParty//cac:PartyIdentification/cbc:ID'),
         "client_name": find_text('.//cac:AccountingSupplierParty//cac:PartyLegalEntity/cbc:RegistrationName'),
-        "client_ruc": find_text('.//cac:AccountingSupplierParty//cac:PartyIdentification/cbc:ID')
+        "client_ruc": find_text('.//cac:AccountingSupplierParty//cac:PartyIdentification/cbc:ID'),
+        "valid": True  # Marcar como válido si llegó hasta aquí
     }
     
     return invoice_data

@@ -7,11 +7,10 @@ import requests
 from typing import List, Annotated, Optional
 from collections import defaultdict
 from dotenv import load_dotenv
-from datetime import datetime, timedelta, timezone
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request, Response, status, Header
+from datetime import datetime, timezone
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request, Response, status, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload, selectinload
-from sqlalchemy import text, update, case
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from google.cloud import storage, pubsub_v1
 import firebase_admin
@@ -122,27 +121,81 @@ async def pubsub_aggregator(request: Request, db: Session = Depends(get_db)):
 
 def process_final_operation(payload: dict, db: Session):
     repo = OperationRepository(db)
-    invoices_by_currency = defaultdict(list)
-    for inv in payload["parsed_results"]: invoices_by_currency[inv['currency']].append(inv)
     original_tracking_id = payload["tracking_id"]
+    
+    # 1. Filtrar facturas válidas
+    valid_invoices = [inv for inv in payload["parsed_results"] 
+                     if inv.get("valid", True) and not inv.get("error")]
+    
+    if not valid_invoices:
+        print(f"FINALIZER: No hay facturas válidas para {original_tracking_id}")
+        return
+    
+    print(f"FINALIZER: {len(valid_invoices)} facturas válidas de {len(payload['parsed_results'])} totales")
+    
+    # 2. Verificar duplicados usando fingerprint
+    duplicate_check = repo.check_duplicate_invoices(valid_invoices)
+    
+    if duplicate_check['has_duplicates']:
+        print(f"FINALIZER: Detectados {len(duplicate_check['duplicates'])} duplicados para {original_tracking_id}:")
+        for dup in duplicate_check['duplicates']:
+            print(f"  - {dup['fingerprint']} ya existe en operación {dup['existing_operation']}")
+        
+        # Decidir qué hacer con duplicados
+        if not duplicate_check['new_invoices']:
+            print(f"FINALIZER: Todas las facturas son duplicadas, rechazando operación {original_tracking_id}")
+            return  # Rechazar si TODAS son duplicadas
+        
+        print(f"FINALIZER: Procesando solo {len(duplicate_check['new_invoices'])} facturas nuevas")
+        valid_invoices = duplicate_check['new_invoices']
+    
+    # 3. Agrupar por moneda (solo facturas nuevas y válidas)
+    invoices_by_currency = defaultdict(list)
+    for inv in valid_invoices:
+        currency = inv.get('currency')
+        if currency in {'PEN', 'USD', 'EUR'}:  # Monedas válidas
+            invoices_by_currency[currency].append(inv)
+    
+    if not invoices_by_currency:
+        print(f"FINALIZER: No hay facturas con monedas válidas para {original_tracking_id}")
+        return
 
+    # 4. Crear operaciones por moneda
     for currency, invoices_in_group in invoices_by_currency.items():
-        operation_id = repo.generar_siguiente_id_operacion()
-        print(f"FINALIZER: Generado nuevo ID {operation_id} para moneda {currency}.")
+        # Usar tracking_id + currency para ID único, evitando generar nuevos IDs
+        operation_id = f"{original_tracking_id}-{currency}"
+        
+        # Verificar si ya existe esta combinación
+        from models import Operacion
+        existing_op = db.query(Operacion).filter(Operacion.id == operation_id).first()
+        if existing_op:
+            print(f"FINALIZER: Operación {operation_id} ya existe, evitando duplicado")
+            continue
+            
+        print(f"FINALIZER: Creando operación {operation_id} para {len(invoices_in_group)} facturas en {currency}")
+        
         repo.save_full_operation(
-            operation_id=operation_id, metadata=payload['metadata'], drive_url=payload['drive_folder_url'],
-            invoices_data=invoices_in_group, cavali_results_map=payload['cavali_results']
+            operation_id=operation_id,
+            metadata=payload['metadata'], 
+            drive_url=payload['drive_folder_url'],
+            invoices_data=invoices_in_group,
+            cavali_results_map=payload['cavali_results']
         )
         print(f"FINALIZER: Operación {operation_id} guardada en DB.")
 
         notification_payload = {
-            "operation_id": operation_id, 
+            "operation_id": operation_id,
+            "idempotency_key": f"{original_tracking_id}_{currency}",  # Clave de idempotencia
             "user_email": payload.get("user_email"), 
             "metadata": payload.get("metadata"),
             "drive_folder_url": payload.get("drive_folder_url"), 
             "cavali_results": payload.get("cavali_results"),
             "parsed_results": invoices_in_group, 
             "gcs_paths": payload.get("gcs_paths"),
+            "duplicate_info": {
+                "duplicates_found": len(duplicate_check['duplicates']),
+                "duplicates_details": duplicate_check['duplicates']
+            },
             "original_tracking_id": original_tracking_id
         }
 
@@ -187,14 +240,28 @@ async def get_operation_status(tracking_id: str, db: Session = Depends(get_db)):
     return {"drive_folder_url": drive_info.get("drive_folder_url")}
 
 @app.get("/api/operaciones")
-async def get_user_operations(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+async def get_user_operations(
+    user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100)
+):
     repo = OperationRepository(db)
     last_login = repo.update_and_get_last_login(user['email'], user.get('name', ''))
-    
+
     user_role = user.get('role')
-    operations = repo.get_dashboard_operations(user['email'], user_role)
+    offset = (page - 1) * limit
     
-    return {"last_login": last_login.isoformat() if last_login else None, "operations": operations}
+    # El método ahora devuelve un diccionario con 'operations' y 'total'
+    paginated_result = repo.get_dashboard_operations(user['email'], user_role, offset, limit)
+
+    return {
+        "last_login": last_login.isoformat() if last_login else None,
+        "operations": paginated_result["operations"],
+        "total": paginated_result["total"],
+        "page": page,
+        "limit": limit
+    }
 
 @app.get("/api/operaciones/{op_id}/detalle")
 async def get_operation_detail(op_id: str, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):

@@ -102,13 +102,13 @@ class OperationRepository:
         self.db.commit()
         return operation_id
     
-    def get_dashboard_operations(self, user_email: str, user_role: str) -> List[Dict[str, Any]]:
+    def get_dashboard_operations(self, user_email: str, user_role: str, offset: int = 0, limit: int = 20) -> Dict[str, Any]:
         """
-        Obtiene operaciones para el dashboard principal.
+        Obtiene operaciones para el dashboard principal con paginación.
         - Admins ven todas las operaciones.
         - Ventas ven solo las operaciones creadas por ellos.
         """
-        
+
         base_query = self.db.query(
             Operacion.id, Operacion.fecha_creacion.label("fechaIngreso"),
             Empresa.razon_social.label("cliente"), Operacion.monto_sumatoria_total.label("monto"),
@@ -116,14 +116,31 @@ class OperationRepository:
             Operacion.estado
         ).join(Empresa, Operacion.cliente_ruc == Empresa.ruc)
 
-        if user_role == 'admin':
-            query = base_query
-        else:
-            query = base_query.filter(Operacion.email_usuario == user_email)
-            
-        results = query.order_by(Operacion.fecha_creacion.desc()).all()
+        count_query = self.db.query(func.count(Operacion.id))
 
-        return [{"id": r.id, "fechaIngreso": r.fechaIngreso.isoformat(), "cliente": r.cliente, "monto": r.monto, "moneda": r.moneda, "estado": r.estado} for r in results]
+        if user_role != 'admin':
+            query = base_query.filter(Operacion.email_usuario == user_email)
+            count_query = count_query.filter(Operacion.email_usuario == user_email)
+        else:
+            query = base_query
+
+        # Contar el total de operaciones para la paginación
+        total_records = count_query.scalar()
+
+        # Aplicar orden, paginación y ejecutar la consulta
+        results = query.order_by(Operacion.fecha_creacion.desc()).offset(offset).limit(limit).all()
+
+        operations_list = [
+            {
+                "id": r.id,
+                "fechaIngreso": r.fechaIngreso.isoformat(),
+                "cliente": r.cliente, "monto": r.monto,
+                "moneda": r.moneda,
+                "estado": r.estado
+            } for r in results
+        ]
+
+        return {"operations": operations_list, "total": total_records}
     
     
     def get_gestiones_operations(self, user_email: str, user_role: str) -> List[Operacion]:
@@ -167,3 +184,44 @@ class OperationRepository:
             self.db.add(usuario)
         self.db.commit()
         return previous_login
+    
+    def check_duplicate_invoices(self, invoices_data: List[Dict]) -> Dict[str, Any]:
+        """
+        Verifica si alguna factura ya existe basándose en:
+        - RUC deudor + número documento + monto + fecha emisión
+        """
+        duplicates = []
+        new_invoices = []
+        
+        for inv in invoices_data:
+            # Crear fingerprint de la factura
+            debtor_ruc = inv.get('debtor_ruc')
+            document_id = inv.get('document_id') 
+            total_amount = float(inv.get('total_amount', 0))
+            issue_date = inv.get('issue_date')
+            
+            if not all([debtor_ruc, document_id, issue_date]):
+                continue  # Skip facturas con datos incompletos
+                
+            # Buscar factura existente con mismo fingerprint
+            existing = self.db.query(Factura).filter(
+                Factura.deudor_ruc == debtor_ruc,
+                Factura.numero_documento == document_id,
+                Factura.monto_total == total_amount,
+                func.date(Factura.fecha_emision) == datetime.fromisoformat(issue_date).date()
+            ).first()
+            
+            if existing:
+                duplicates.append({
+                    'invoice': inv,
+                    'existing_operation': existing.id_operacion,
+                    'fingerprint': f"{debtor_ruc}-{document_id}-{total_amount}-{issue_date}"
+                })
+            else:
+                new_invoices.append(inv)
+        
+        return {
+            'duplicates': duplicates,
+            'new_invoices': new_invoices,
+            'has_duplicates': len(duplicates) > 0
+        }
