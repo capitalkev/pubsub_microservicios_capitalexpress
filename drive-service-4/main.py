@@ -47,18 +47,19 @@ def upload_files_in_background(all_gcs_paths: list, folder_id: str, tracking_id:
             print(f"WARN-BG: Falló la subida de '{gcs_path}'. Error: {e}")
     print(f"DRIVE-BG: Subida en segundo plano para {tracking_id} completada.")
 
+
 @app.post("/pubsub-handler", status_code=status.HTTP_204_NO_CONTENT)
 async def pubsub_handler(request: Request, background_tasks: BackgroundTasks):
     body = await request.json()
     if not body or "message" not in body:
         raise HTTPException(status_code=400, detail="Payload de Pub/Sub inválido.")
-
+    # 1. Crear carpeta en Google Drive y publicar el link / 2. Subir archivos a segundo plano
     try:
         message_data = base64.b64decode(body["message"]["data"]).decode("utf-8")
         payload = json.loads(message_data)
         tracking_id = payload["tracking_id"]
 
-        # ETAPA RÁPIDA: Crear carpeta y publicar el link
+        # Crear carpeta y publicar el link
         operation_id = payload.get("operation_id", tracking_id)
         folder_name = f"Operacion_{operation_id}"
         folder_metadata = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder', 'parents': [DRIVE_PARENT_FOLDER_ID]}
@@ -73,7 +74,7 @@ async def pubsub_handler(request: Request, background_tasks: BackgroundTasks):
         next_message_data = json.dumps(payload).encode("utf-8")
         publisher.publish(TOPIC_FILES_ARCHIVED, next_message_data).result()
         
-        # ETAPA LENTA: Delegar la subida de archivos a un segundo plano
+        # Delegar la subida de archivos a un segundo plano
         gcs_paths = payload.get("gcs_paths", {})
         all_gcs_paths = gcs_paths.get('xml', []) + gcs_paths.get('pdf', []) + gcs_paths.get('respaldo', [])
         background_tasks.add_task(upload_files_in_background, all_gcs_paths, folder_id, tracking_id)

@@ -39,7 +39,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Clientes y Variables Globales ---
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "operaciones-peru")
 BUCKET_NAME = os.getenv("BUCKET_NAME")
 TRELLO_SERVICE_URL = os.getenv("TRELLO_SERVICE_URL")
@@ -74,9 +73,7 @@ async def get_current_user(authorization: Optional[str] = Header(None), db: Sess
     except Exception as e:
         raise HTTPException(status_code=401, detail=f"Token inválido o error de base de datos: {e}")
 
-# ==============================================================================
-# ROL 1: INICIO DEL FLUJO (FAN-OUT)
-# ==============================================================================
+# Receptor de operaciones del frontend
 @app.post("/submit-operation", status_code=status.HTTP_202_ACCEPTED)
 async def submit_operation_async(
     metadata_str: Annotated[str, Form(alias="metadata")],
@@ -100,9 +97,7 @@ async def submit_operation_async(
     except Exception as e:
         traceback.print_exc(); raise HTTPException(status_code=500, detail=str(e))
 
-# ==============================================================================
-# ROL 2: AGREGADOR (FAN-IN)
-# ==============================================================================
+# Endpoint para recibir datos de Pub/Sub y agregarlos a la operación
 @app.post("/pubsub-aggregator", status_code=status.HTTP_204_NO_CONTENT)
 async def pubsub_aggregator(request: Request, db: Session = Depends(get_db)):
     body = await request.json(); message = body.get("message", {})
@@ -151,6 +146,7 @@ def process_final_operation(payload: dict, db: Session):
             "original_tracking_id": original_tracking_id
         }
 
+        # Enviar notificación a Gmail
         try:
             if GMAIL_SERVICE_URL:
                 print(f"FINALIZER: Llamando directamente a Gmail para op {operation_id}")
@@ -163,7 +159,8 @@ def process_final_operation(payload: dict, db: Session):
             print(f"ERROR: Falló la llamada a Gmail para op {operation_id}. Error: {e}")
             if e.response:
                 print(f"GMAIL-SERVICE respondió con: {e.response.text}")
-        
+                
+        # Enviar notificación a Trello
         try:
             if TRELLO_SERVICE_URL:
                 print(f"FINALIZER: Llamando directamente a Trello para op {operation_id}")
@@ -179,9 +176,8 @@ def process_final_operation(payload: dict, db: Session):
         publisher.publish(TOPIC_OPERATION_PERSISTED, json.dumps(notification_payload).encode("utf-8")).result()
         print(f"FINALIZER: Notificación para Gmail (Op: {operation_id}) publicada.")
 
-# ==============================================================================
 # ROL 3: ENDPOINTS DE CONSULTA
-# ==============================================================================
+
 @app.get("/operation-status/{tracking_id}")
 async def get_operation_status(tracking_id: str, db: Session = Depends(get_db)):
     staging_record = db.query(models.OperationStaging).filter_by(tracking_id=tracking_id).first()
@@ -200,16 +196,60 @@ async def get_user_operations(user: dict = Depends(get_current_user), db: Sessio
     
     return {"last_login": last_login.isoformat() if last_login else None, "operations": operations}
 
+@app.get("/api/operaciones/{op_id}/detalle")
+async def get_operation_detail(op_id: str, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    operacion = db.query(models.Operacion).options(
+        joinedload(models.Operacion.cliente),
+        selectinload(models.Operacion.facturas).joinedload(models.Factura.deudor),
+        selectinload(models.Operacion.gestiones).joinedload(models.Gestion.analista)
+    ).filter(models.Operacion.id == op_id).first()
+    
+    if not operacion:
+        raise HTTPException(status_code=404, detail="Operación no encontrada")
+    
+    # Verificar permisos: admins ven todo, ventas solo sus operaciones
+    if user.get('role') != 'admin' and operacion.email_usuario != user['email']:
+        raise HTTPException(status_code=403, detail="No tiene permisos para ver esta operación")
+    
+    return {
+        "id": operacion.id,
+        "fechaIngreso": operacion.fecha_creacion.isoformat(),
+        "cliente": operacion.cliente.razon_social if operacion.cliente else "N/A",
+        "deudor": operacion.facturas[0].deudor.razon_social if operacion.facturas and operacion.facturas[0].deudor else "N/A",
+        "monto": operacion.monto_sumatoria_total,
+        "moneda": operacion.moneda_sumatoria,
+        "estado": operacion.estado,
+        "emailUsuario": operacion.email_usuario,
+        "nombreEjecutivo": operacion.nombre_ejecutivo,
+        "urlCarpetaDrive": operacion.url_carpeta_drive,
+        "gestiones": [{
+            "id": g.id,
+            "fecha": g.fecha_creacion.isoformat(),
+            "tipo": g.tipo,
+            "resultado": g.resultado,
+            "nombreContacto": g.nombre_contacto,
+            "cargoContacto": g.cargo_contacto,
+            "telefonoEmailContacto": g.telefono_email_contacto,
+            "notas": g.notas,
+            "analista": g.analista.nombre if g.analista else "Sistema"
+        } for g in operacion.gestiones],
+        "facturas": [{
+            "folio": f.numero_documento,
+            "deudorRuc": f.deudor_ruc,
+            "deudorNombre": f.deudor.razon_social if f.deudor else "N/A",
+            "fechaEmision": f.fecha_emision.isoformat() if f.fecha_emision else None,
+            "fechaVencimiento": f.fecha_vencimiento.isoformat() if f.fecha_vencimiento else None,
+            "monto": f.monto_total,
+            "moneda": f.moneda,
+            "estado": f.estado
+        } for f in operacion.facturas]
+    }
+
 
 @app.get("/api/gestiones/operaciones")
 async def get_operaciones_gestion(user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    # La lógica compleja ahora está en el repositorio. El endpoint es simple y claro.
     repo = OperationRepository(db)
-    
-    # 1. Obtenemos las operaciones usando el nuevo método centralizado.
     operaciones_db = repo.get_gestiones_operations(user_email=user['email'], user_role=user.get('role'))
-    
-    # 2. El resto de la función es solo para formatear la respuesta, como debe ser.
     resultado_formateado = []
     for op in operaciones_db:
         alerta_ia = None
@@ -217,10 +257,8 @@ async def get_operaciones_gestion(user: dict = Depends(get_current_user), db: Se
         if antiquity_days > 3 and len(op.gestiones) == 0:
             alerta_ia = {"tipo": "llamar", "texto": "¡Llamar ya! Operación con más de 3 días sin gestión."}
 
-        # Aseguramos que el estado de la operación se mapea correctamente para el frontend
         estado_operacion = op.estado
         if op.estado == 'Conforme' and not op.adelanto_express:
-             # Este es el estado que el frontend entiende para mostrar el botón "Completar"
              pass 
 
         resultado_formateado.append({
@@ -235,7 +273,7 @@ async def get_operaciones_gestion(user: dict = Depends(get_current_user), db: Se
             "adelantoExpress": op.adelanto_express,
             "estadoOperacion": estado_operacion,
             "analistaAsignado": { "nombre": op.analista_asignado.nombre if op.analista_asignado else "Sin Asignar", "email": op.analista_asignado.email if op.analista_asignado else None },
-            "gestiones": [{ "fecha": g.fecha_creacion.isoformat(), "tipo": g.tipo, "resultado": g.resultado, "notas": g.notas, "analista": g.analista.nombre if g.analista else "Sistema" } for g in op.gestiones],
+            "gestiones": [{ "id": g.id, "fecha": g.fecha_creacion.isoformat(), "tipo": g.tipo, "resultado": g.resultado, "notas": g.notas, "analista": g.analista.nombre if g.analista else "Sistema" } for g in op.gestiones],
             "facturas": [{ "folio": f.numero_documento, "monto": f.monto_total, "moneda": f.moneda, "estado": f.estado } for f in op.facturas],
             "alertaIA": alerta_ia
         })
@@ -259,6 +297,20 @@ async def registrar_gestion(op_id: str, gestion_data: GestionCreate, user: dict 
     db.commit()
     db.refresh(nueva_gestion)
     return nueva_gestion
+
+@app.delete("/api/gestiones/{gestion_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def eliminar_gestion(gestion_id: int, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    gestion = db.query(models.Gestion).filter(models.Gestion.id == gestion_id).first()
+    if not gestion:
+        raise HTTPException(status_code=404, detail="Gestión no encontrada")
+    
+    # Verificar que el usuario tiene permisos para eliminar la gestión
+    if user['role'] != 'admin' and gestion.analista_email != user['email']:
+        raise HTTPException(status_code=403, detail="No tiene permisos para eliminar esta gestión")
+    
+    db.delete(gestion)
+    db.commit()
+    return
 
 class FacturaUpdate(BaseModel):
     estado: str
@@ -332,12 +384,6 @@ async def get_current_user_session(user: dict = Depends(get_current_user), db: S
     Devuelve los detalles del usuario autenticado, incluyendo su rol,
     basado en el token JWT proporcionado.
     """
-    # La dependencia 'get_current_user' ya ha hecho todo el trabajo pesado:
-    # 1. Verificó el token.
-    # 2. Consultó la base de datos para obtener el rol.
-    # 3. Lo añadió al diccionario 'user'.
-    
-    # Solo necesitamos buscar de nuevo para obtener el objeto completo para la respuesta.
     user_in_db = db.query(models.Usuario).filter(models.Usuario.email == user['email']).first()
     
     if not user_in_db:

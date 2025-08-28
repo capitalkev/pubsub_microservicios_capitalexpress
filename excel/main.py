@@ -1,4 +1,4 @@
-# gcp-microservicios/excel/main.py (Versión Corregida)
+# gcp-microservicios/excel/main.py
 import gspread
 import os
 from fastapi import FastAPI, HTTPException
@@ -46,9 +46,9 @@ def update_contact(contacto: Contacto):
 
 @app.get("/get-emails/{ruc}", summary="Obtener correos de un RUC")
 def get_emails(ruc: str):
+    # Verifica que la cella de RUC no esté vacía y si existe en la hoja se envia el correo
     try:
         celda = worksheet.find(ruc, in_column=1)
-        # CORRECCIÓN: Manejar el caso de que la celda de correos esté vacía o no exista
         correos = ""
         if celda:
             correos_val = worksheet.cell(celda.row, 3).value
@@ -56,7 +56,6 @@ def get_emails(ruc: str):
                 correos = correos_val
         return {"ruc": ruc, "emails": correos}
     except gspread.exceptions.CellNotFound:
-        # Si no se encuentra el RUC, devolvemos una lista vacía, no un error.
         return {"ruc": ruc, "emails": ""}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error inesperado al obtener correos: {str(e)}")

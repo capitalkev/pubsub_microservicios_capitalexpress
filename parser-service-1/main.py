@@ -8,12 +8,10 @@ from parser import extract_invoice_data
 
 app = FastAPI(title="Parser Service (Pub/Sub Enabled)")
 
-# --- Clientes de Google Cloud ---
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "operaciones-peru")
 storage_client = storage.Client()
 publisher = pubsub_v1.PublisherClient()
 
-# --- Tema de Salida ---
 TOPIC_INVOICES_PARSED = publisher.topic_path(GCP_PROJECT_ID, "invoices-parsed")
 
 def read_xml_from_gcs(gcs_path):

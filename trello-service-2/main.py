@@ -1,4 +1,4 @@
-# gcp-microservicios/trello-service-2/main.py (Versión Final con HTTP, Idempotencia y Lógica de Negocio COMPLETA)
+# gcp-microservicios/trello-service-2/main.py
 
 import os
 import requests
@@ -12,7 +12,6 @@ from google.cloud import storage
 load_dotenv()
 app = FastAPI(title="Trello Service (HTTP Endpoint)")
 
-# --- Clientes y Variables ---
 TRELLO_API_KEY = os.getenv("TRELLO_API_KEY")
 TRELLO_TOKEN = os.getenv("TRELLO_TOKEN")
 TRELLO_BOARD_ID = os.getenv("TRELLO_BOARD_ID")
@@ -22,7 +21,6 @@ PENDIENTE_CONFORMIDAD = os.getenv("PENDIENTE_CONFORMIDAD")
 PENDIENTE_HR = os.getenv("PENDIENTE_HR")
 storage_client = storage.Client()
 
-# --- Funciones Auxiliares (de tu código original) ---
 def _format_number(num: float) -> str:
     return "{:,.2f}".format(num if num is not None else 0)
 
@@ -58,9 +56,7 @@ def card_exists(operation_id: str) -> bool:
     print(f"TRELLO: No se encontraron tarjetas para la op {operation_id}.")
     return False
 
-# ==============================================================================
-# LÓGICA DE NEGOCIO ORIGINAL (PROPORCIONADA POR TI)
-# ==============================================================================
+# Crea una tarjeta en Trello con la información del payload
 def process_operation_and_create_card(payload: Dict[str, Any]):
     print("--- 1. Iniciando procesamiento de tarjeta ---")
     operation_id = payload.get("operation_id")
@@ -114,7 +110,6 @@ def process_operation_and_create_card(payload: Dict[str, Any]):
         cavali_status_lines.append(f"- {doc_id}: *{cavali_message}*")
     cavali_markdown = "\n".join(cavali_status_lines) if cavali_status_lines else "- No se procesó en Cavali."
 
-    # --- TU LÓGICA EXACTA PARA LA DESCRIPCIÓN ---
     card_description_anticipo = f"""
 # ANTICIPO PROPUESTO: {porcentajeAdelanto} %
 
@@ -161,8 +156,6 @@ def process_operation_and_create_card(payload: Dict[str, Any]):
     else:            
         card_description = card_description_sin_anticipo
 
-    # --- FIN DE TU LÓGICA DE DESCRIPCIÓN ---
-
     id_labels_str = ",".join(filter(None, [PENDIENTE_HR, PENDIENTE_CONFORMIDAD, PENDIENTE_CAVALI]))
     auth_params = {'key': TRELLO_API_KEY, 'token': TRELLO_TOKEN}
     card_payload = {
@@ -189,9 +182,7 @@ def process_operation_and_create_card(payload: Dict[str, Any]):
             
     return card_id
 
-# ==============================================================================
-# NUEVO ENDPOINT HTTP
-# ==============================================================================
+# Endpoint para crear una tarjeta en Trello
 @app.post("/create-card")
 def create_trello_card_endpoint(payload: Dict[str, Any]):
     operation_id = payload.get("operation_id")

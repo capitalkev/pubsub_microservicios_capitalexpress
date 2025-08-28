@@ -26,10 +26,7 @@ CAVALI_STATUS_URL = os.getenv("CAVALI_STATUS_URL")
 GCS_BUCKET_NAME_TOKEN = os.getenv("GCS_BUCKET_NAME")
 TOKEN_FILE_NAME = "cavali_token.json"
 
-# ---- NUEVA CONSTANTE ----
-# Define el tamaño del lote de XML a procesar en cada llamada a Cavali.
-# Puedes ajustar este número según el tamaño promedio de tus archivos XML.
-XML_BATCH_SIZE = 30
+XML_BATCH_SIZE = 30 # Tamaño del lote para procesar XMLs
 
 storage_client = storage.Client()
 publisher = pubsub_v1.PublisherClient()
@@ -70,9 +67,7 @@ def get_cavali_token():
     logging.info(f"Nuevo token de Cavali guardado en GCS.")
     return new_token_data["access_token"]
 
-# ==============================================================================
-# ---- FUNCIÓN `pubsub_handler` MODIFICADA ----
-# ==============================================================================
+
 @app.post("/pubsub-handler", status_code=status.HTTP_204_NO_CONTENT)
 async def pubsub_handler(request: Request):
     body = await request.json()
@@ -130,7 +125,7 @@ async def pubsub_handler(request: Request):
 
                 invoice_details = cavali_response_data.get("response", {}).get("Process", {}).get("ProcessInvoiceDetail", {}).get("Invoice", [])
                 for invoice in invoice_details:
-                    # Lógica para mapear el resultado al nombre de archivo original
+                    # Logica para mapear el resultado al nombre de archivo original
                     nombre_archivo_original = "desconocido"
                     for f in batch: # Buscar solo en el lote actual
                         if (str(invoice.get("ruc", "")) in f["filename"] and

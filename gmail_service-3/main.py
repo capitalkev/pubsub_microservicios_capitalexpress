@@ -1,5 +1,5 @@
 import os, base64, mimetypes, io, json, traceback, requests
-from fastapi import FastAPI, Request, Response, status, HTTPException
+from fastapi import FastAPI, status, HTTPException
 from email.message import EmailMessage
 from dotenv import load_dotenv
 from collections import defaultdict
@@ -11,24 +11,25 @@ from googleapiclient.discovery import build
 import pandas as pd
 from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
+import PyPDF2
+import google.generativeai as genai
 
 load_dotenv()
 
-# --- Configuración ---
 USER_TOKEN_FILE = "token.json"
 SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 SENDER_USER_ID = "kevin.gianecchine@capitalexpress.cl"
 EXCEL_SERVICE_URL = os.getenv("EXCEL_SERVICE_URL")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+print(f"DEBUG: EXCEL_SERVICE_URL = {EXCEL_SERVICE_URL}")
+print(f"DEBUG: GEMINI_API_KEY = {GEMINI_API_KEY[:10]}..." if GEMINI_API_KEY else "DEBUG: GEMINI_API_KEY = None")
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/devstorage.read_only",
 ]
 FIXED_CC_LIST = [
     "kevin.gianecchine@capitalexpress.cl",
-    "jenssy.huaman@capitalexpress.pe",
-    "jakeline.quispe@capitalexpress.pe",
-    "jhonny.celay@capitalexpress.pe",
-    "kevin.tupac@capitalexpress.cl",
 ]
 RUC_GLORIA = [
     "20100190797",
@@ -67,9 +68,124 @@ RUC_GLORIA = [
     "20481640483",
 ]
 
-# El título ahora refleja que es un servicio por HTTP directo
 app = FastAPI(title="Gmail Service (HTTP Direct)")
 
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
+def extract_pdf_data_local(pdf_paths: List[str], storage_client) -> Dict[str, Dict[str, str]]:
+    """Extrae datos de PDFs usando PyPDF2 y crea diccionario para Gemini"""
+    pdf_data = {}
+    
+    for pdf_path in pdf_paths:
+        try:
+            bucket_name, blob_name = pdf_path.replace("gs://", "").split("/", 1)
+            pdf_bytes = storage_client.bucket(bucket_name).blob(blob_name).download_as_bytes()
+            
+            pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
+            full_text = ""
+            
+            for page_num in range(min(2, len(pdf_reader.pages))): # Limitar a las primeras 2 páginas
+                full_text += pdf_reader.pages[page_num].extract_text()
+            
+            clean_text = ' '.join(full_text.split())
+            
+            pdf_data[pdf_path] = {
+                "filename": os.path.basename(pdf_path),
+                "text_content": clean_text[:2000],
+                "text_length": len(clean_text)
+            }
+            
+        except Exception as e:
+            print(f"Error extrayendo datos de {pdf_path}: {e}")
+            pdf_data[pdf_path] = {
+                "filename": os.path.basename(pdf_path),
+                "text_content": "",
+                "error": str(e)
+            }
+    
+    return pdf_data
+
+def classify_pdfs_with_gemini(pdf_data: Dict, invoices_by_ruc: Dict) -> Dict[str, List[str]]:
+    """Usa Gemini para clasificar PDFs basándose en texto extraído"""
+    
+    if not GEMINI_API_KEY:
+        print("WARN: No GEMINI_API_KEY configurado, usando fallback")
+        fallback_result = defaultdict(list)
+        for ruc in invoices_by_ruc.keys():
+            fallback_result[ruc] = list(pdf_data.keys())
+        return dict(fallback_result)
+    
+    known_clients = {}
+    for ruc, facturas in invoices_by_ruc.items():
+        known_clients[ruc] = {
+            "debtor_name": facturas[0]['debtor_name'],
+            "document_ids": [f['document_id'] for f in facturas],
+            "client_name": facturas[0]['client_name'],
+            "client_ruc": facturas[0]['client_ruc']
+        }
+    
+    prompt = f"""
+    Analiza los siguientes datos extraídos de PDFs de facturas y clasifícalos por RUC de deudor.
+
+    CLIENTES CONOCIDOS EN ESTA OPERACIÓN:
+    {json.dumps(known_clients, indent=2, ensure_ascii=False)}
+
+    DATOS DE PDFs A CLASIFICAR:
+    {json.dumps(pdf_data, indent=2, ensure_ascii=False)}
+
+    INSTRUCCIONES:
+    1. Para cada PDF, identifica el RUC del deudor/proveedor basándote en el texto extraído
+    2. Coincide con uno de los RUCs conocidos en la operación
+    3. Si no encuentras coincidencia exacta, usa el nombre de la empresa para hacer matching
+    4. Si hay dudas, asigna a "unknown"
+
+    RESPONDE EN ESTE FORMATO JSON:
+    {{
+        "classifications": {{
+            "gs://path/to/pdf1.pdf": "20603596294",
+            "gs://path/to/pdf2.pdf": "20100190797",
+            "gs://path/to/pdf3.pdf": "unknown"
+        }},
+        "confidence_notes": {{
+            "gs://path/to/pdf1.pdf": "Coincidencia exacta por RUC",
+            "gs://path/to/pdf2.pdf": "Coincidencia por nombre empresa"
+        }}
+    }}
+    """
+
+    try:
+        response = genai.GenerativeModel('gemini-1.5-flash').generate_content(prompt)
+        print(f"DEBUG Gemini response text: {response.text}")
+        
+        # Limpiar respuesta de markdown si viene con ```json
+        clean_text = response.text.strip()
+        if clean_text.startswith('```json'):
+            clean_text = clean_text[7:]  # Remove ```json
+        if clean_text.endswith('```'):
+            clean_text = clean_text[:-3]  # Remove ```
+        clean_text = clean_text.strip()
+        
+        result = json.loads(clean_text)
+        
+        pdf_classification = defaultdict(list)
+        
+        for pdf_path, assigned_ruc in result["classifications"].items():
+            if assigned_ruc != "unknown" and assigned_ruc in invoices_by_ruc:
+                pdf_classification[assigned_ruc].append(pdf_path)
+            else:
+                for ruc in invoices_by_ruc.keys():
+                    pdf_classification[ruc].append(pdf_path)
+        
+        print("Gemini classification notes:", result.get("confidence_notes", {}))
+        return dict(pdf_classification)
+        
+    except Exception as e:
+        print(f"Error en clasificación Gemini: {e}")
+        fallback_result = defaultdict(list)
+        for ruc in invoices_by_ruc.keys():
+            fallback_result[ruc] = list(pdf_data.keys())
+        return dict(fallback_result)
 
 def get_user_credentials():
     """Obtiene las credenciales de usuario desde el archivo token.json."""
@@ -86,7 +202,6 @@ def get_user_credentials():
                 "No se encontraron credenciales de usuario válidas o el token ha expirado y no se puede refrescar."
             )
     return creds
-
 
 def create_gloria_excel(invoice_data_list: List[Dict]) -> (str, bytes): # type: ignore
     """Genera un archivo Excel para Gloria a partir de una lista de diccionarios de facturas."""
@@ -158,7 +273,6 @@ def create_gloria_excel(invoice_data_list: List[Dict]) -> (str, bytes): # type: 
     excel_bytes = output_buffer.getvalue()
     filename = f"CapitalExpress_{datetime.now().strftime('%d%m%Y')}.xlsx"
     return filename, excel_bytes
-
 
 def create_html_body(invoice_data_list: List[Dict], operation_id) -> str:
     """Crea el cuerpo HTML del correo a partir de una lista de diccionarios de facturas."""
@@ -244,9 +358,8 @@ def create_html_body(invoice_data_list: List[Dict], operation_id) -> str:
     """
     return mensaje_html
 
-
 @app.post("/send-email", status_code=status.HTTP_200_OK)
-async def send_email_handler(payload: Dict[str, Any]): # <-- ¡Este es el cambio!
+async def send_email_handler(payload: Dict[str, Any]):
     operation_id = payload.get("operation_id")
     if not operation_id:
         raise HTTPException(status_code=400, detail="Falta 'operation_id' en el payload")
@@ -266,6 +379,17 @@ async def send_email_handler(payload: Dict[str, Any]): # <-- ¡Este es el cambio
         invoices_by_debtor_ruc = defaultdict(list)
         for inv in invoices:
             invoices_by_debtor_ruc[inv['debtor_ruc']].append(inv)
+
+        pdf_paths = payload.get("gcs_paths", {}).get("pdf", [])
+        pdf_by_ruc = {}
+        if pdf_paths:
+            print(f"Clasificando {len(pdf_paths)} PDFs usando PyPDF2 + Gemini...")
+            
+            pdf_data = extract_pdf_data_local(pdf_paths, storage_client_user)
+            
+            pdf_by_ruc = classify_pdfs_with_gemini(pdf_data, invoices_by_debtor_ruc)
+            
+            print(f"Clasificación completada: {pdf_by_ruc}")
 
         sent_emails_log = []
         for ruc_deudor, facturas_grupo in invoices_by_debtor_ruc.items():
@@ -290,7 +414,8 @@ async def send_email_handler(payload: Dict[str, Any]): # <-- ¡Este es el cambio
             if not correos_finales_str:
                 print(f"ADVERTENCIA: No se encontraron correos para RUC {ruc_deudor} en op {operation_id}.")
                 continue
-
+            
+            # Crear el cuerpo del mensaje HTML y el mensaje de correo
             message = EmailMessage()
             message.add_alternative(create_html_body(facturas_grupo, operation_id), subtype='html')
             message['To'] = correos_finales_str
@@ -300,16 +425,20 @@ async def send_email_handler(payload: Dict[str, Any]): # <-- ¡Este es el cambio
             message['Cc'] = ",".join(sorted(list(cc_list)))
             message['Subject'] = f"Confirmación de Facturas Negociables - {facturas_grupo[0]['client_name']}"
 
-            pdf_paths = payload.get("gcs_paths", {}).get("pdf", [])
-            for path in pdf_paths:
+            # ADJUNTAR SOLO PDFs RELEVANTES PARA ESTE RUC
+            relevant_pdfs = pdf_by_ruc.get(ruc_deudor, [])
+            print(f"Adjuntando {len(relevant_pdfs)} PDFs para RUC {ruc_deudor}")
+            for path in relevant_pdfs:
                 try:
                     bucket_name, blob_name = path.replace("gs://", "").split("/", 1)
                     pdf_bytes = storage_client_user.bucket(bucket_name).blob(blob_name).download_as_bytes()
                     maintype, subtype = (mimetypes.guess_type(os.path.basename(path))[0] or "application/octet-stream").split('/')
                     message.add_attachment(pdf_bytes, maintype=maintype, subtype=subtype, filename=os.path.basename(path))
+                    print(f"  ✓ Adjuntado: {os.path.basename(path)}")
                 except Exception as e:
                     print(f"ADVERTENCIA: al adjuntar el archivo {path}: {e}")
-            
+                    
+            # Adjuntar Excel para Gloria si corresponde
             if ruc_deudor in RUC_GLORIA:
                 filename, excel_bytes = create_gloria_excel(facturas_grupo)
                 if filename and excel_bytes:

@@ -9,3 +9,5 @@ google-cloud-storage
 pandas
 openpyxl
 google-cloud-pubsub
+PyPDF2
+google-generativeai

@@ -28,13 +28,9 @@ class OperationRepository:
         today_str = datetime.now(timezone.utc).strftime('%Y%m%d')
         id_prefix = f"OP-{today_str}-"
         
-        # --- LÓGICA CORREGIDA Y A PRUEBA DE FALLOS (SIN CAMBIAR LA DB) ---
-        # Esta línea bloquea la tabla temporalmente para que solo una instancia
-        # pueda calcular el siguiente ID a la vez. Es una operación atómica.
         self.db.execute(text("LOCK TABLE operaciones IN EXCLUSIVE MODE"))
         
         last_id_today = self.db.query(func.max(Operacion.id)).filter(Operacion.id.like(f"{id_prefix}%")).scalar()
-        # --- FIN DE LA CORRECCIÓN ---
         
         next_number = 1
         if last_id_today:
@@ -120,15 +116,11 @@ class OperationRepository:
             Operacion.estado
         ).join(Empresa, Operacion.cliente_ruc == Empresa.ruc)
 
-        # Lógica de filtrado por ROL
         if user_role == 'admin':
-            # El admin no necesita filtros adicionales, ve todo.
             query = base_query
-        else: # Por defecto, cualquier otro rol (incluido 'ventas') solo ve lo suyo.
-            # Filtra donde el 'email_usuario' de la operación coincida con el del solicitante.
+        else:
             query = base_query.filter(Operacion.email_usuario == user_email)
             
-        # Ordenamos los resultados y los ejecutamos
         results = query.order_by(Operacion.fecha_creacion.desc()).all()
 
         return [{"id": r.id, "fechaIngreso": r.fechaIngreso.isoformat(), "cliente": r.cliente, "monto": r.monto, "moneda": r.moneda, "estado": r.estado} for r in results]
@@ -140,11 +132,9 @@ class OperationRepository:
         - Admins ven todas las operaciones activas.
         - Gestión ve solo las operaciones activas asignadas a ellos.
         """
-        # 1. Definimos explícitamente los estados que pertenecen a esta cola de trabajo.
-        # Esto es más robusto que una lista de exclusión.
+
         ESTADOS_DE_GESTION_ACTIVA = ['En Verificación', 'Discrepancia', 'Conforme', 'Adelanto']
 
-        # 2. Construimos la consulta base con todas las relaciones necesarias para evitar N+1 queries.
         base_query = self.db.query(Operacion).options(
             joinedload(Operacion.cliente),
             selectinload(Operacion.facturas).joinedload(Factura.deudor),
@@ -152,14 +142,11 @@ class OperationRepository:
             joinedload(Operacion.analista_asignado)
         ).filter(Operacion.estado.in_(ESTADOS_DE_GESTION_ACTIVA))
 
-        # 3. Aplicamos el filtro de rol de forma clara.
         if user_role != 'admin':
             query = base_query.filter(Operacion.analista_asignado_email == user_email)
         else:
-            # El admin no necesita filtros adicionales.
             query = base_query
 
-        # 4. Definimos un ordenamiento lógico.
         priority_order = case(
             (Operacion.fecha_creacion < (datetime.now(timezone.utc) - timedelta(days=5)), 1),
             (Operacion.fecha_creacion < (datetime.now(timezone.utc) - timedelta(days=2)), 2),
@@ -167,8 +154,6 @@ class OperationRepository:
         ).asc()
 
         return query.order_by(priority_order, Operacion.monto_sumatoria_total.desc()).all()
-
-        
         
     def update_and_get_last_login(self, email: str, name: str) -> Optional[datetime]:
         now = datetime.now(timezone.utc)
