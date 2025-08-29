@@ -32,7 +32,12 @@ except Exception as e:
 app = FastAPI(title="Orquestador de Operaciones")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "https://operaciones-peru.web.app"],
+    allow_origins=[
+        "http://localhost:5173", 
+        "https://localhost:5173",
+        "http://127.0.0.1:5173", 
+        "https://operaciones-peru.web.app"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -66,7 +71,6 @@ async def get_current_user(authorization: Optional[str] = Header(None), db: Sess
             repo.update_and_get_last_login(email, decoded_token.get('name', ''))
             user_in_db = db.query(models.Usuario).filter(models.Usuario.email == email).first()
 
-        # Se asigna el rol como un string simple desde la BD
         decoded_token['role'] = user_in_db.rol 
         return decoded_token
     except Exception as e:
@@ -438,6 +442,93 @@ async def asignar_operacion(op_id: str, assignee_email: str, user: dict = Depend
     operacion.analista_asignado_email = assignee_email
     db.commit()
     return {"status": "ok", "message": f"Operación {op_id} asignada a {assignee_email}."}
+
+class SendVerificationRequest(BaseModel):
+    emails: str
+    customMessage: Optional[str] = None
+
+@app.post("/api/operaciones/{op_id}/send-verification", status_code=status.HTTP_200_OK)
+async def send_verification_emails(
+    op_id: str, 
+    request: SendVerificationRequest, 
+    user: dict = Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
+    """Envía correos de verificación manual para una operación específica"""
+    # Verificar que la operación existe
+    operacion = db.query(models.Operacion).options(
+        selectinload(models.Operacion.facturas)
+    ).filter(models.Operacion.id == op_id).first()
+    
+    if not operacion:
+        raise HTTPException(status_code=404, detail="Operación no encontrada")
+    
+    if not request.emails.strip():
+        raise HTTPException(status_code=400, detail="Debe proporcionar al menos un correo electrónico")
+    
+    try:
+        # Preparar datos para el servicio de Gmail
+        facturas_data = []
+        for factura in operacion.facturas:
+            facturas_data.append({
+                "debtor_ruc": factura.ruc_deudor,
+                "debtor_name": factura.nombre_deudor,
+                "client_ruc": factura.ruc_cliente, 
+                "client_name": factura.nombre_cliente,
+                "document_id": factura.folio,
+                "total_amount": float(factura.monto_factura),
+                "net_amount": float(factura.monto_neto),
+                "currency": factura.moneda,
+                "issue_date": factura.fecha_emision.isoformat(),
+                "due_date": factura.fecha_pago.isoformat()
+            })
+        
+        # Payload para el servicio Gmail
+        gmail_payload = {
+            "operation_id": op_id,
+            "parsed_results": facturas_data,
+            "user_email": user['email'],
+            "metadata": {
+                "mailVerificacion": request.emails,
+                "customMessage": request.customMessage
+            },
+            "gcs_paths": {
+                "pdf": []  # No adjuntar PDFs en verificaciones manuales
+            }
+        }
+        
+        # Llamar al servicio Gmail
+        response = requests.post(
+            f"{GMAIL_SERVICE_URL}/send-email",
+            json=gmail_payload,
+            timeout=60
+        )
+        
+        if response.status_code != 200:
+            error_detail = response.json().get("detail", "Error desconocido en el servicio de correo")
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Error al enviar correos: {error_detail}"
+            )
+        
+        return {
+            "status": "success",
+            "message": f"Correos de verificación enviados exitosamente a: {request.emails}",
+            "details": response.json()
+        }
+        
+    except requests.exceptions.RequestException as e:
+        print(f"Error comunicándose con Gmail service: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Servicio de correo temporalmente no disponible"
+        )
+    except Exception as e:
+        print(f"Error inesperado en send_verification_emails: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Error interno del servidor"
+        )
 
 class UserSession(BaseModel):
     email: str

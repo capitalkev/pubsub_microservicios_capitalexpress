@@ -274,7 +274,7 @@ def create_gloria_excel(invoice_data_list: List[Dict]) -> (str, bytes): # type: 
     filename = f"CapitalExpress_{datetime.now().strftime('%d%m%Y')}.xlsx"
     return filename, excel_bytes
 
-def create_html_body(invoice_data_list: List[Dict], operation_id) -> str:
+def create_html_body(invoice_data_list: List[Dict], operation_id, custom_message: str = None) -> str:
     """Crea el cuerpo HTML del correo a partir de una lista de diccionarios de facturas."""
     first_invoice = invoice_data_list[0]
     client_name = first_invoice.get("client_name")
@@ -343,6 +343,7 @@ def create_html_body(invoice_data_list: List[Dict], operation_id) -> str:
         RUC Cliente: {client_ruc}
         </p>
         {tabla_html}
+        {"<p><strong>Mensaje adicional:</strong></p><p>" + custom_message + "</p>" if custom_message and custom_message.strip() else ""}
         <p>Agradecemos de antemano su pronta respuesta. Con su confirmación, procederemos a la anotación en cuenta en CAVALI.</p>
         <p class="disclaimer">"Sin perjuicio de lo anteriormente mencionado, nos permitimos recordarles que toda acción tendiente a 
         simular la emisión de la referida factura negociable o letra para obtener un beneficio a título personal o a favor de la otra 
@@ -416,8 +417,9 @@ async def send_email_handler(payload: Dict[str, Any]):
                 continue
             
             # Crear el cuerpo del mensaje HTML y el mensaje de correo
+            custom_message = payload.get('metadata', {}).get('customMessage')
             message = EmailMessage()
-            message.add_alternative(create_html_body(facturas_grupo, operation_id), subtype='html')
+            message.add_alternative(create_html_body(facturas_grupo, operation_id, custom_message), subtype='html')
             message['To'] = correos_finales_str
             cc_list = set(FIXED_CC_LIST)
             if payload.get("user_email"):
