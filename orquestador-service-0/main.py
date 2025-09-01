@@ -166,15 +166,8 @@ def process_final_operation(payload: dict, db: Session):
 
     # 4. Crear operaciones por moneda
     for currency, invoices_in_group in invoices_by_currency.items():
-        # Usar tracking_id + currency para ID único, evitando generar nuevos IDs
-        operation_id = f"{original_tracking_id}-{currency}"
-        
-        # Verificar si ya existe esta combinación
-        from models import Operacion
-        existing_op = db.query(Operacion).filter(Operacion.id == operation_id).first()
-        if existing_op:
-            print(f"FINALIZER: Operación {operation_id} ya existe, evitando duplicado")
-            continue
+        # Generar ID de operación con formato OP-YYYYMMDD-XXX
+        operation_id = repo.generar_siguiente_id_operacion()
             
         print(f"FINALIZER: Creando operación {operation_id} para {len(invoices_in_group)} facturas en {currency}")
         
@@ -189,7 +182,7 @@ def process_final_operation(payload: dict, db: Session):
 
         notification_payload = {
             "operation_id": operation_id,
-            "idempotency_key": f"{original_tracking_id}_{currency}",  # Clave de idempotencia
+            "idempotency_key": f"{operation_id}_{currency}",
             "user_email": payload.get("user_email"), 
             "metadata": payload.get("metadata"),
             "drive_folder_url": payload.get("drive_folder_url"), 
@@ -204,29 +197,46 @@ def process_final_operation(payload: dict, db: Session):
         }
 
         # Enviar notificación a Gmail
+        print(f"FINALIZER: Gmail URL configurada: {GMAIL_SERVICE_URL}")
         try:
             if GMAIL_SERVICE_URL:
-                print(f"FINALIZER: Llamando directamente a Gmail para op {operation_id}")
-                gmail_response = requests.post(f"{GMAIL_SERVICE_URL}/send-email", json=notification_payload, timeout=300)
+                full_gmail_url = f"{GMAIL_SERVICE_URL}/send-email"
+                print(f"FINALIZER: Llamando a Gmail URL: {full_gmail_url}")
+                print(f"FINALIZER: Payload para Gmail: operation_id={operation_id}, parsed_results={len(notification_payload.get('parsed_results', []))}")
+                
+                gmail_response = requests.post(full_gmail_url, json=notification_payload, timeout=300)
+                print(f"FINALIZER: Gmail respondió con status code: {gmail_response.status_code}")
                 gmail_response.raise_for_status()
                 print(f"FINALIZER: Llamada a Gmail para op {operation_id} completada con éxito.")
             else:
                 print("ADVERTENCIA: GMAIL_SERVICE_URL no está configurada.")
         except requests.exceptions.RequestException as e:
             print(f"ERROR: Falló la llamada a Gmail para op {operation_id}. Error: {e}")
-            if e.response:
+            print(f"ERROR: Tipo de error: {type(e).__name__}")
+            if hasattr(e, 'response') and e.response:
+                print(f"GMAIL-SERVICE respondió con status: {e.response.status_code}")
                 print(f"GMAIL-SERVICE respondió con: {e.response.text}")
                 
         # Enviar notificación a Trello
+        print(f"FINALIZER: Trello URL configurada: {TRELLO_SERVICE_URL}")
         try:
             if TRELLO_SERVICE_URL:
-                print(f"FINALIZER: Llamando directamente a Trello para op {operation_id}")
-                trello_response = requests.post(f"{TRELLO_SERVICE_URL}/create-card", json=notification_payload, timeout=300)
+                full_trello_url = f"{TRELLO_SERVICE_URL}/create-card"
+                print(f"FINALIZER: Llamando a Trello URL: {full_trello_url}")
+                print(f"FINALIZER: Payload para Trello: operation_id={operation_id}")
+                
+                trello_response = requests.post(full_trello_url, json=notification_payload, timeout=300)
+                print(f"FINALIZER: Trello respondió con status code: {trello_response.status_code}")
                 trello_response.raise_for_status()
+                print(f"FINALIZER: Llamada a Trello para op {operation_id} completada con éxito.")
             else:
                 print("ADVERTENCIA: TRELLO_SERVICE_URL no está configurada.")
         except requests.exceptions.RequestException as e:
             print(f"ERROR: Falló la llamada a Trello para op {operation_id}. Error: {e}")
+            print(f"ERROR: Tipo de error: {type(e).__name__}")
+            if hasattr(e, 'response') and e.response:
+                print(f"TRELLO-SERVICE respondió con status: {e.response.status_code}")
+                print(f"TRELLO-SERVICE respondió con: {e.response.text}")
 
         
 
