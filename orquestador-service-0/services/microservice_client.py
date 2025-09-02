@@ -20,12 +20,16 @@ class MicroserviceClient:
                 
             url = f"{config.PARSER_SERVICE_URL}/parse-direct"
             
-            async with asyncio.timeout(300):  # 5 min timeout
-                response = self.session.post(url, json=operation_data, timeout=300)
+            # Usar asyncio.wait_for en lugar de asyncio.timeout para compatibilidad con Python < 3.11
+            async def make_request():
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(None, lambda: self.session.post(url, json=operation_data, timeout=300))
                 response.raise_for_status()
-                result = response.json()
-                logging.info(f"PARSER: Éxito para {operation_data['tracking_id']}")
-                return result.get("parsed_results", {})
+                return response.json()
+            
+            result = await asyncio.wait_for(make_request(), timeout=300)
+            logging.info(f"PARSER: Éxito para {operation_data['tracking_id']}")
+            return result.get("parsed_results", {})
                 
         except Exception as e:
             logging.error(f"PARSER: Error para {operation_data['tracking_id']}: {e}")
@@ -40,12 +44,16 @@ class MicroserviceClient:
                 
             url = f"{config.CAVALI_SERVICE_URL}/validate-direct"
             
-            async with asyncio.timeout(600):  # 10 min timeout
-                response = self.session.post(url, json=operation_data, timeout=600)
+            # Usar asyncio.wait_for en lugar de asyncio.timeout para compatibilidad con Python < 3.11
+            async def make_request():
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(None, lambda: self.session.post(url, json=operation_data, timeout=600))
                 response.raise_for_status()
-                result = response.json()
-                logging.info(f"CAVALI: Éxito para {operation_data['tracking_id']}")
-                return result.get("cavali_results", {})
+                return response.json()
+            
+            result = await asyncio.wait_for(make_request(), timeout=600)
+            logging.info(f"CAVALI: Éxito para {operation_data['tracking_id']}")
+            return result.get("cavali_results", {})
                 
         except Exception as e:
             logging.warning(f"CAVALI: Error para {operation_data['tracking_id']}: {e}, continuando sin validación")
@@ -67,6 +75,30 @@ class MicroserviceClient:
         except Exception as e:
             logging.error(f"GMAIL: Error enviando email: {e}")
             return False
+    
+    async def call_drive_service(self, operation_data: dict) -> dict:
+        """Llama al drive service directamente con tolerancia a fallos"""
+        try:
+            if not config.DRIVE_SERVICE_URL:
+                logging.warning("DRIVE_SERVICE_URL no configurada, continuando sin archivado")
+                return {}
+                
+            url = f"{config.DRIVE_SERVICE_URL}/archive-direct"
+            
+            # Usar asyncio.wait_for en lugar de asyncio.timeout para compatibilidad con Python < 3.11
+            async def make_request():
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(None, lambda: self.session.post(url, json=operation_data, timeout=30))
+                response.raise_for_status()
+                return response.json()
+            
+            result = await asyncio.wait_for(make_request(), timeout=30)
+            logging.info(f"DRIVE: Éxito para {operation_data['tracking_id']}")
+            return result
+                
+        except Exception as e:
+            logging.warning(f"DRIVE: Error para {operation_data['tracking_id']}: {e}, continuando sin archivado")
+            return {}
     
     def call_trello_service(self, payload: dict) -> bool:
         """Llama al servicio de Trello"""

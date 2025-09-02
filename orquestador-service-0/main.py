@@ -1,9 +1,7 @@
 import uuid
 import json
 import os
-import base64
 import traceback
-import requests
 from typing import List, Annotated, Optional
 from collections import defaultdict
 from dotenv import load_dotenv
@@ -12,7 +10,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Req
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from google.cloud import storage, pubsub_v1
+from google.cloud import storage
 import firebase_admin
 from firebase_admin import credentials, auth
 from database import get_db, engine
@@ -21,6 +19,7 @@ import models
 from pydantic import BaseModel
 import logging
 import asyncio
+from services.microservice_client import microservice_client
 
 models.Base.metadata.create_all(bind=engine)
 load_dotenv()
@@ -54,11 +53,7 @@ PARSER_SERVICE_URL = os.getenv("PARSER_SERVICE_URL")
 CAVALI_SERVICE_URL = os.getenv("CAVALI_SERVICE_URL")
 
 storage_client = storage.Client()
-publisher = pubsub_v1.PublisherClient()
 bucket = storage_client.bucket(BUCKET_NAME)
-
-TOPIC_OPERATION_SUBMITTED = publisher.topic_path(GCP_PROJECT_ID, "operation-submitted")
-TOPIC_OPERATION_PERSISTED = publisher.topic_path(GCP_PROJECT_ID, "operation-persisted")
 
 
 async def get_current_user(authorization: Optional[str] = Header(None), db: Session = Depends(get_db)) -> dict:
@@ -92,16 +87,28 @@ async def submit_operation_async(
     try:
         metadata = json.loads(metadata_str)
         tracking_id = str(uuid.uuid4())
+        
+        # GENERAR OPERATION_ID AL INICIO para consistencia total
+        repo = OperationRepository(db)
+        operation_id = repo.generar_siguiente_id_operacion()
+        logging.info(f"SUBMIT: Generado operation_id {operation_id} para tracking {tracking_id}")
+        
         upload_folder = f"operations/{datetime.now(timezone.utc).strftime('%Y-%m-%d')}/{tracking_id}"
         def upload_file(file: UploadFile, subfolder: str) -> str:
             blob_path = f"{upload_folder}/{subfolder}/{file.filename}"; blob = bucket.blob(blob_path); blob.upload_from_file(file.file); return f"gs://{BUCKET_NAME}/{blob_path}"
         
         gcs_paths = { "xml": [upload_file(f, "xml") for f in xml_files], "pdf": [upload_file(f, "pdf") for f in pdf_files], "respaldo": [upload_file(f, "respaldos") for f in respaldo_files] }
-        operation_data = { "tracking_id": tracking_id, "user_email": user['email'], "metadata": metadata, "gcs_paths": gcs_paths }
+        operation_data = { 
+            "tracking_id": tracking_id, 
+            "operation_id": operation_id,  # ✨ AGREGADO: operation_id desde el inicio
+            "user_email": user['email'], 
+            "metadata": metadata, 
+            "gcs_paths": gcs_paths 
+        }
         
-        # Procesar directamente Parser y Cavali, Drive en paralelo
+        # Procesar directamente con operation_id ya definido
         await process_operation_sync(operation_data, db)
-        return {"status": "processing", "tracking_id": tracking_id}
+        return {"status": "processing", "tracking_id": tracking_id, "operation_id": operation_id}
     except Exception as e:
         traceback.print_exc(); raise HTTPException(status_code=500, detail=str(e))
 
@@ -109,8 +116,8 @@ async def process_operation_sync(operation_data: dict, db: Session):
     """
     Procesa la operación de forma síncrona:
     1. Parser (secuencial)
-    2. Cavali (secuencial, con tolerancia a fallos)
-    3. Drive (paralelo, pub/sub)
+    2. Cavali (secuencial, con tolerancia a fallos)  
+    3. Drive (paralelo, directo)
     4. Finalizar operación
     """
     try:
@@ -118,124 +125,40 @@ async def process_operation_sync(operation_data: dict, db: Session):
         logging.info(f"SYNC: Iniciando procesamiento de {tracking_id}")
         
         # 1. Llamar Parser directamente
-        parsed_results = await call_parser_service(operation_data)
+        parsed_results = await microservice_client.call_parser_service(operation_data)
         if not parsed_results:
             logging.error(f"SYNC: Parser falló para {tracking_id}")
             raise Exception("Parser service failed")
         
         # 2. Llamar Cavali directamente (con tolerancia a fallos)
-        cavali_results = await call_cavali_service(operation_data)
+        cavali_results = await microservice_client.call_cavali_service(operation_data)
         if not cavali_results:
             logging.warning(f"SYNC: Cavali falló para {tracking_id}, continuando sin validación")
             cavali_results = {}
         
-        # 3. Publicar a Drive en paralelo
-        drive_payload = {**operation_data}
-        publisher.publish(TOPIC_OPERATION_SUBMITTED, json.dumps(drive_payload).encode("utf-8")).result()
+        # 3. Llamar Drive directamente (operation_id ya incluido en operation_data)
+        operation_id = operation_data["operation_id"]
+        drive_results = await microservice_client.call_drive_service(operation_data)
+        drive_folder_url = drive_results.get("drive_folder_url", "")
+        if drive_folder_url:
+            logging.info(f"SYNC: Drive folder creado para {tracking_id} como {operation_id}: {drive_folder_url}")
         
-        # 4. Esperar resultado de Drive y finalizar
-        await wait_for_drive_and_finalize(tracking_id, operation_data, parsed_results, cavali_results, db)
+        # 4. Finalizar operación inmediatamente
+        final_payload = {
+            **operation_data,
+            "parsed_results": parsed_results,
+            "cavali_results": cavali_results,
+            "drive_folder_url": drive_folder_url
+        }
+        process_final_operation(final_payload, db)
+        logging.info(f"SYNC: Operación {tracking_id} completada exitosamente como {operation_id}")
         
     except Exception as e:
         logging.error(f"SYNC: Error procesando {operation_data.get('tracking_id')}: {e}")
         traceback.print_exc()
         raise
 
-async def call_parser_service(operation_data: dict) -> dict:
-    """Llama al parser service directamente"""
-    try:
-        if not PARSER_SERVICE_URL:
-            logging.error("PARSER_SERVICE_URL no configurada")
-            return {}
-            
-        url = f"{PARSER_SERVICE_URL}/parse-direct"
-        headers = {"Content-Type": "application/json"}
-        
-        async with asyncio.timeout(300):  # 5 min timeout
-            response = requests.post(url, json=operation_data, headers=headers, timeout=300)
-            response.raise_for_status()
-            result = response.json()
-            logging.info(f"PARSER: Éxito para {operation_data['tracking_id']}")
-            return result.get("parsed_results", {})
-            
-    except Exception as e:
-        logging.error(f"PARSER: Error para {operation_data['tracking_id']}: {e}")
-        return {}
 
-async def call_cavali_service(operation_data: dict) -> dict:
-    """Llama al cavali service directamente con tolerancia a fallos"""
-    try:
-        if not CAVALI_SERVICE_URL:
-            logging.warning("CAVALI_SERVICE_URL no configurada, continuando sin validación")
-            return {}
-            
-        url = f"{CAVALI_SERVICE_URL}/validate-direct"
-        headers = {"Content-Type": "application/json"}
-        
-        async with asyncio.timeout(600):  # 10 min timeout
-            response = requests.post(url, json=operation_data, headers=headers, timeout=600)
-            response.raise_for_status()
-            result = response.json()
-            logging.info(f"CAVALI: Éxito para {operation_data['tracking_id']}")
-            return result.get("cavali_results", {})
-            
-    except Exception as e:
-        logging.warning(f"CAVALI: Error para {operation_data['tracking_id']}: {e}, continuando sin validación")
-        return {}
-
-async def wait_for_drive_and_finalize(tracking_id: str, operation_data: dict, parsed_results: dict, cavali_results: dict, db: Session):
-    """Espera el resultado de Drive y finaliza la operación"""
-    try:
-        # Insertar datos iniciales en staging
-        stmt = pg_insert(models.OperationStaging).values(
-            tracking_id=tracking_id, 
-            initial_payload=operation_data,
-            parsed_data=parsed_results,
-            cavali_data=cavali_results
-        )
-        db.execute(stmt)
-        db.commit()
-        
-        # El aggregator se encargará de finalizar cuando llegue drive_data
-        logging.info(f"SYNC: Datos de Parser y Cavali guardados para {tracking_id}, esperando Drive")
-        
-    except Exception as e:
-        logging.error(f"SYNC: Error guardando datos para {tracking_id}: {e}")
-        raise
-
-# Endpoint para recibir datos de Pub/Sub y agregarlos a la operación
-@app.post("/pubsub-aggregator", status_code=status.HTTP_204_NO_CONTENT)
-async def pubsub_aggregator(request: Request, db: Session = Depends(get_db)):
-    body = await request.json(); message = body.get("message", {})
-    if not message or "data" not in message: raise HTTPException(status_code=400)
-    try:
-        payload = json.loads(base64.b64decode(message["data"]).decode("utf-8")); tracking_id = payload["tracking_id"]
-        # Solo manejamos Drive ahora, Parser y Cavali se procesan síncronamente
-        if "drive_folder_url" in payload:
-            # Actualizar con datos de Drive
-            update_data = {"drive_data": {"drive_folder_url": payload["drive_folder_url"]}}
-            stmt = pg_insert(models.OperationStaging).values(tracking_id=tracking_id, **update_data).on_conflict_do_update(index_elements=['tracking_id'], set_=update_data)
-            db.execute(stmt)
-            
-            # Verificar si ya tenemos todos los datos (parser, cavali ya están, solo faltaba drive)
-            staging_record = db.query(models.OperationStaging).filter_by(tracking_id=tracking_id).with_for_update().first()
-            if staging_record and staging_record.parsed_data is not None and staging_record.drive_data:
-                logging.info(f"AGGREGATOR: Todos los datos para {tracking_id} recibidos. Procesando.")
-                final_payload = staging_record.initial_payload
-                final_payload.update({
-                    "parsed_results": staging_record.parsed_data,
-                    "cavali_results": staging_record.cavali_data or {},
-                    "drive_folder_url": staging_record.drive_data["drive_folder_url"]
-                })
-                process_final_operation(final_payload, db)
-                db.delete(staging_record)
-        else:
-            logging.warning(f"AGGREGATOR: Payload inesperado para {tracking_id}. Payload keys: {list(payload.keys())}")
-            return Response(status_code=status.HTTP_204_NO_CONTENT)
-        db.commit()
-    except Exception as e:
-        db.rollback(); traceback.print_exc(); raise
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 def process_final_operation(payload: dict, db: Session):
     repo = OperationRepository(db)
@@ -280,8 +203,11 @@ def process_final_operation(payload: dict, db: Session):
 
     # 4. Crear operaciones por moneda
     for currency, invoices_in_group in invoices_by_currency.items():
-        # Generar ID de operación con formato OP-YYYYMMDD-XXX
-        operation_id = repo.generar_siguiente_id_operacion()
+        # Usar operation_id que ya viene definido desde el inicio
+        if payload.get("operation_id") and len(invoices_by_currency) == 1:
+            operation_id = payload["operation_id"]
+        else:
+            operation_id = repo.generar_siguiente_id_operacion()
             
         print(f"FINALIZER: Creando operación {operation_id} para {len(invoices_in_group)} facturas en {currency}")
         
@@ -310,62 +236,38 @@ def process_final_operation(payload: dict, db: Session):
             "original_tracking_id": original_tracking_id
         }
 
-        # Enviar notificación a Gmail
-        print(f"FINALIZER: Gmail URL configurada: {GMAIL_SERVICE_URL}")
+        # Enviar notificaciones directamente (no bloqueante)
+        print(f"FINALIZER: Enviando notificaciones para operación {operation_id}")
         try:
-            if GMAIL_SERVICE_URL:
-                full_gmail_url = f"{GMAIL_SERVICE_URL}/send-email"
-                print(f"FINALIZER: Llamando a Gmail URL: {full_gmail_url}")
-                print(f"FINALIZER: Payload para Gmail: operation_id={operation_id}, parsed_results={len(notification_payload.get('parsed_results', []))}")
-                
-                gmail_response = requests.post(full_gmail_url, json=notification_payload, timeout=300)
-                print(f"FINALIZER: Gmail respondió con status code: {gmail_response.status_code}")
-                gmail_response.raise_for_status()
-                print(f"FINALIZER: Llamada a Gmail para op {operation_id} completada con éxito.")
-            else:
-                print("ADVERTENCIA: GMAIL_SERVICE_URL no está configurada.")
-        except requests.exceptions.RequestException as e:
-            print(f"ERROR: Falló la llamada a Gmail para op {operation_id}. Error: {e}")
-            print(f"ERROR: Tipo de error: {type(e).__name__}")
-            if hasattr(e, 'response') and e.response:
-                print(f"GMAIL-SERVICE respondió con status: {e.response.status_code}")
-                print(f"GMAIL-SERVICE respondió con: {e.response.text}")
-                
-        # Enviar notificación a Trello
-        print(f"FINALIZER: Trello URL configurada: {TRELLO_SERVICE_URL}")
-        try:
-            if TRELLO_SERVICE_URL:
-                full_trello_url = f"{TRELLO_SERVICE_URL}/create-card"
-                print(f"FINALIZER: Llamando a Trello URL: {full_trello_url}")
-                print(f"FINALIZER: Payload para Trello: operation_id={operation_id}")
-                
-                trello_response = requests.post(full_trello_url, json=notification_payload, timeout=300)
-                print(f"FINALIZER: Trello respondió con status code: {trello_response.status_code}")
-                trello_response.raise_for_status()
-                print(f"FINALIZER: Llamada a Trello para op {operation_id} completada con éxito.")
-            else:
-                print("ADVERTENCIA: TRELLO_SERVICE_URL no está configurada.")
-        except requests.exceptions.RequestException as e:
-            print(f"ERROR: Falló la llamada a Trello para op {operation_id}. Error: {e}")
-            print(f"ERROR: Tipo de error: {type(e).__name__}")
-            if hasattr(e, 'response') and e.response:
-                print(f"TRELLO-SERVICE respondió con status: {e.response.status_code}")
-                print(f"TRELLO-SERVICE respondió con: {e.response.text}")
-
-        
-
-        publisher.publish(TOPIC_OPERATION_PERSISTED, json.dumps(notification_payload).encode("utf-8")).result()
-        print(f"FINALIZER: Notificación para Gmail (Op: {operation_id}) publicada.")
+            microservice_client.call_trello_service(notification_payload)
+            microservice_client.call_gmail_service(notification_payload)
+            print(f"FINALIZER: Notificaciones enviadas exitosamente para operación {operation_id}")
+        except Exception as e:
+            print(f"FINALIZER: Error enviando notificaciones para {operation_id}: {e}")
 
 # ROL 3: ENDPOINTS DE CONSULTA
 
 @app.get("/operation-status/{tracking_id}")
 async def get_operation_status(tracking_id: str, db: Session = Depends(get_db)):
-    staging_record = db.query(models.OperationStaging).filter_by(tracking_id=tracking_id).first()
-    if not staging_record:
-        raise HTTPException(status_code=404, detail="Operación no encontrada en la etapa de procesamiento.")
-    drive_info = staging_record.drive_data or {}
-    return {"drive_folder_url": drive_info.get("drive_folder_url")}
+    """
+    Con el nuevo sistema síncrono, las operaciones se completan inmediatamente.
+    Retornamos un status que el frontend entienda para parar el polling.
+    """
+    # Buscar la operación más reciente que puede corresponder a este tracking_id
+    # Como las operaciones se procesan inmediatamente, debería estar en operaciones
+    recent_operation = db.query(models.Operacion).order_by(models.Operacion.fecha_creacion.desc()).first()
+    
+    drive_url = ""
+    if recent_operation and recent_operation.url_carpeta_drive:
+        drive_url = recent_operation.url_carpeta_drive
+    
+    return {
+        "status": "completed",
+        "drive_folder_url": drive_url,
+        "tracking_id": tracking_id,
+        "message": "Operación procesada exitosamente",
+        "processed_synchronously": True
+    }
 
 @app.get("/api/operaciones")
 async def get_user_operations(

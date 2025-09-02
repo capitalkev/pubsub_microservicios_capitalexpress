@@ -84,3 +84,49 @@ async def pubsub_handler(request: Request, background_tasks: BackgroundTasks):
         return Response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+@app.post("/archive-direct")
+async def archive_direct(request: Request, background_tasks: BackgroundTasks):
+    """Endpoint directo para archivado síncrono desde orquestador"""
+    try:
+        operation_data = await request.json()
+        tracking_id = operation_data["tracking_id"]
+        
+        print(f"DRIVE DIRECTO: Procesando {tracking_id}")
+        
+        if not drive_service:
+            raise HTTPException(status_code=503, detail="Servicio de Drive no disponible")
+        
+        # Crear carpeta y retornar URL inmediatamente
+        operation_id = operation_data.get("operation_id", tracking_id)
+        folder_name = f"Operacion_{operation_id}"
+        folder_metadata = {
+            'name': folder_name, 
+            'mimeType': 'application/vnd.google-apps.folder', 
+            'parents': [DRIVE_PARENT_FOLDER_ID]
+        }
+        folder = drive_service.files().create(
+            body=folder_metadata, 
+            fields='id, webViewLink', 
+            supportsAllDrives=True
+        ).execute()
+        
+        folder_id = folder.get('id')
+        folder_url = folder.get('webViewLink')
+        
+        print(f"DRIVE DIRECTO: Carpeta '{folder_name}' creada. URL: {folder_url}")
+        
+        # Subir archivos en background
+        gcs_paths = operation_data.get("gcs_paths", {})
+        all_gcs_paths = gcs_paths.get('xml', []) + gcs_paths.get('pdf', []) + gcs_paths.get('respaldo', [])
+        
+        if all_gcs_paths:
+            background_tasks.add_task(upload_files_in_background, all_gcs_paths, folder_id, tracking_id)
+            print(f"DRIVE DIRECTO: {len(all_gcs_paths)} archivos programados para subida en background")
+        
+        return {"drive_folder_url": folder_url}
+        
+    except Exception as e:
+        print(f"DRIVE DIRECTO: Error para {tracking_id}: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))

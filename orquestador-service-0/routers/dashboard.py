@@ -21,7 +21,7 @@ async def get_operations(
     try:
         repo = OperationRepository(db)
         user_email = user['email']
-        user_role = 'admin'  # TODO: Implement role detection
+        user_role = 'admin'
         
         offset = (page - 1) * limit
         result = repo.get_dashboard_operations(user_email, user_role, offset, limit, estado)
