@@ -86,7 +86,7 @@ def extract_pdf_data_local(pdf_paths: List[str], storage_client) -> Dict[str, Di
             pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
             full_text = ""
             
-            for page_num in range(min(2, len(pdf_reader.pages))): # Limitar a las primeras 2 páginas
+            for page_num in range(min(2, len(pdf_reader.pages))):
                 full_text += pdf_reader.pages[page_num].extract_text()
             
             clean_text = ' '.join(full_text.split())
@@ -404,9 +404,9 @@ async def send_email_handler(payload: Dict[str, Any]):
 
                 for correo in correos_operacion:
                     update_payload = {"ruc": ruc_deudor, "correo": correo, "nombre_deudor": nombre_deudor}
-                    requests.post(f"{EXCEL_SERVICE_URL}/update-contact", json=update_payload, timeout=20).raise_for_status()
+                    requests.post(f"{EXCEL_SERVICE_URL}/update-contact", json=update_payload, timeout=60).raise_for_status()
 
-                response = requests.get(f"{EXCEL_SERVICE_URL}/get-emails/{ruc_deudor}", timeout=20)
+                response = requests.get(f"{EXCEL_SERVICE_URL}/get-emails/{ruc_deudor}", timeout=60)
                 if response.status_code == 200:
                     correos_finales_str = response.json().get("emails", "")
                 
@@ -417,7 +417,6 @@ async def send_email_handler(payload: Dict[str, Any]):
                 print(f"ADVERTENCIA: No se encontraron correos para RUC {ruc_deudor} en op {operation_id}.")
                 continue
             
-            # Crear el cuerpo del mensaje HTML y el mensaje de correo
             custom_message = payload.get('metadata', {}).get('customMessage')
             message = EmailMessage()
             message.add_alternative(create_html_body(facturas_grupo, operation_id, custom_message), subtype='html')
@@ -428,7 +427,6 @@ async def send_email_handler(payload: Dict[str, Any]):
             message['Cc'] = ",".join(sorted(list(cc_list)))
             message['Subject'] = f"Confirmación de Facturas Negociables - {facturas_grupo[0]['client_name']}"
 
-            # ADJUNTAR SOLO PDFs RELEVANTES PARA ESTE RUC
             relevant_pdfs = pdf_by_ruc.get(ruc_deudor, [])
             print(f"Adjuntando {len(relevant_pdfs)} PDFs para RUC {ruc_deudor}")
             for path in relevant_pdfs:
@@ -441,7 +439,6 @@ async def send_email_handler(payload: Dict[str, Any]):
                 except Exception as e:
                     print(f"ADVERTENCIA: al adjuntar el archivo {path}: {e}")
                     
-            # Adjuntar Excel para Gloria si corresponde
             if ruc_deudor in RUC_GLORIA:
                 filename, excel_bytes = create_gloria_excel(facturas_grupo)
                 if filename and excel_bytes:

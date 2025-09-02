@@ -59,3 +59,34 @@ async def pubsub_handler(request: Request):
         return Response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+@app.post("/parse-direct")
+async def parse_direct(request: Request):
+    """Endpoint directo para procesamiento síncrono desde orquestador"""
+    try:
+        operation_data = await request.json()
+        tracking_id = operation_data["tracking_id"]
+        xml_paths = operation_data.get("gcs_paths", {}).get("xml", [])
+        
+        print(f"PARSER DIRECTO: Procesando {tracking_id} con {len(xml_paths)} XMLs.")
+        
+        parsed_invoices = []
+        for xml_path in xml_paths:
+            try:
+                xml_content = read_xml_from_gcs(xml_path)
+                invoice_data = extract_invoice_data(xml_content)
+                invoice_data['xml_filename'] = xml_path.split('/')[-1]
+                parsed_invoices.append(invoice_data)
+            except Exception as e:
+                print(f"PARSER DIRECTO: Error procesando {xml_path}: {e}")
+                continue
+        
+        result = {"parsed_results": parsed_invoices}
+        print(f"PARSER DIRECTO: {tracking_id} procesado exitosamente con {len(parsed_invoices)} facturas.")
+        
+        return result
+        
+    except Exception as e:
+        print(f"PARSER DIRECTO: Error: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))

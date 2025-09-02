@@ -1,4 +1,3 @@
-# orquestador-service-0/repository.py (Versión Final Correcta)
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
 from sqlalchemy import case, func
@@ -102,9 +101,9 @@ class OperationRepository:
         self.db.commit()
         return operation_id
     
-    def get_dashboard_operations(self, user_email: str, user_role: str, offset: int = 0, limit: int = 20) -> Dict[str, Any]:
+    def get_dashboard_operations(self, user_email: str, user_role: str, offset: int = 0, limit: int = 20, estado_filter: Optional[str] = None) -> Dict[str, Any]:
         """
-        Obtiene operaciones para el dashboard principal con paginación.
+        Obtiene operaciones para el dashboard principal con paginación y filtro opcional por estado.
         - Admins ven todas las operaciones.
         - Ventas ven solo las operaciones creadas por ellos.
         """
@@ -113,16 +112,22 @@ class OperationRepository:
             Operacion.id, Operacion.fecha_creacion.label("fechaIngreso"),
             Empresa.razon_social.label("cliente"), Operacion.monto_sumatoria_total.label("monto"),
             Operacion.moneda_sumatoria.label("moneda"),
-            Operacion.estado
+            Operacion.estado, Operacion.tasa_operacion, Operacion.comision
         ).join(Empresa, Operacion.cliente_ruc == Empresa.ruc)
 
-        count_query = self.db.query(func.count(Operacion.id))
+        count_query = self.db.query(func.count(Operacion.id)).join(Empresa, Operacion.cliente_ruc == Empresa.ruc)
 
+        # Aplicar filtros de rol
         if user_role != 'admin':
-            query = base_query.filter(Operacion.email_usuario == user_email)
+            base_query = base_query.filter(Operacion.email_usuario == user_email)
             count_query = count_query.filter(Operacion.email_usuario == user_email)
-        else:
-            query = base_query
+
+        # Aplicar filtro por estado si se proporciona
+        if estado_filter:
+            base_query = base_query.filter(Operacion.estado == estado_filter)
+            count_query = count_query.filter(Operacion.estado == estado_filter)
+
+        query = base_query
 
         # Contar el total de operaciones para la paginación
         total_records = count_query.scalar()
@@ -136,7 +141,9 @@ class OperationRepository:
                 "fechaIngreso": r.fechaIngreso.isoformat(),
                 "cliente": r.cliente, "monto": r.monto,
                 "moneda": r.moneda,
-                "estado": r.estado
+                "estado": r.estado,
+                "tasa": r.tasa_operacion,
+                "comision": r.comision
             } for r in results
         ]
 
@@ -150,7 +157,7 @@ class OperationRepository:
         - Gestión ve solo las operaciones activas asignadas a ellos.
         """
 
-        ESTADOS_DE_GESTION_ACTIVA = ['En Verificación', 'Discrepancia', 'Conforme', 'Adelanto']
+        ESTADOS_DE_GESTION_ACTIVA = ['En Verificación', 'Discrepancia', 'Conforme', 'Adelanto', 'Rechazada']
 
         base_query = self.db.query(Operacion).options(
             joinedload(Operacion.cliente),
@@ -194,16 +201,14 @@ class OperationRepository:
         new_invoices = []
         
         for inv in invoices_data:
-            # Crear fingerprint de la factura
             debtor_ruc = inv.get('debtor_ruc')
             document_id = inv.get('document_id') 
             total_amount = float(inv.get('total_amount', 0))
             issue_date = inv.get('issue_date')
             
             if not all([debtor_ruc, document_id, issue_date]):
-                continue  # Skip facturas con datos incompletos
+                continue 
                 
-            # Buscar factura existente con mismo fingerprint
             existing = self.db.query(Factura).filter(
                 Factura.deudor_ruc == debtor_ruc,
                 Factura.numero_documento == document_id,
